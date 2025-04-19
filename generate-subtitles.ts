@@ -418,6 +418,12 @@ function extractFromMarkdownBlocks(
       // Extract tags from this block
       const tags = getAllSublineTags(blockContent);
 
+      if (verboseMode && tags.length > 1) {
+        console.log(
+          `Found ${tags.length} subtitle tags in a single markdown block`
+        );
+      }
+
       for (const tagContent of tags) {
         const extractedData = extractSubtitleData(tagContent, extractTimings);
 
@@ -430,43 +436,103 @@ function extractFromMarkdownBlocks(
     else {
       // Try to find subtitle data directly in the block
       // This handles cases where the markdown block contains tag content without the <subline> wrapper
-      const number =
-        extractNestedTagContent(blockContent, "original_number") ||
-        extractNestedTagContent(blockContent, "number") ||
-        extractNestedTagContent(blockContent, "id");
 
-      const english =
-        extractNestedTagContent(blockContent, "better_english_translation") ||
-        extractNestedTagContent(blockContent, "english_translation") ||
-        extractNestedTagContent(blockContent, "english");
+      // First try to find multiple subtitle entries by looking for multiple number tags
+      const numberTags = findAllNumberTags(blockContent);
 
-      const korean =
-        extractNestedTagContent(blockContent, "korean_translation") ||
-        extractNestedTagContent(blockContent, "korean");
+      if (numberTags.length > 1 && verboseMode) {
+        console.log(
+          `Found ${numberTags.length} potential subtitle entries in a block without subline tags`
+        );
+      }
 
-      if (number && (english || korean)) {
-        const result: ExtractedSubtitleData = {
-          number,
-          english: english || "",
-          korean: korean || "",
-        };
+      if (numberTags.length > 0) {
+        // We have multiple entries in one block without proper subline tags
+        for (const { number, startPos, endPos } of numberTags) {
+          // Extract a section around this number tag to find its related content
+          // Look from this tag until the next one or end of content
+          const nextStartPos =
+            numberTags.find((t) => t.startPos > startPos)?.startPos ||
+            blockContent.length;
+          const sectionContent = blockContent.substring(startPos, nextStartPos);
 
-        if (extractTimings) {
-          const timing =
-            extractNestedTagContent(blockContent, "original_timing") ||
-            extractNestedTagContent(blockContent, "timing");
+          const english =
+            extractNestedTagContent(
+              sectionContent,
+              "better_english_translation"
+            ) ||
+            extractNestedTagContent(sectionContent, "english_translation") ||
+            extractNestedTagContent(sectionContent, "english");
 
-          if (timing) {
-            result.timing = timing;
-            const timingParts = timing.split(" --> ");
-            if (timingParts.length === 2) {
-              result.startTime = timeToSeconds(timingParts[0]);
-              result.endTime = timeToSeconds(timingParts[1]);
+          const korean =
+            extractNestedTagContent(sectionContent, "korean_translation") ||
+            extractNestedTagContent(sectionContent, "korean");
+
+          if (number && (english || korean)) {
+            const result: ExtractedSubtitleData = {
+              number,
+              english: english || "",
+              korean: korean || "",
+            };
+
+            if (extractTimings) {
+              const timing =
+                extractNestedTagContent(sectionContent, "original_timing") ||
+                extractNestedTagContent(sectionContent, "timing");
+
+              if (timing) {
+                result.timing = timing;
+                const timingParts = timing.split(" --> ");
+                if (timingParts.length === 2) {
+                  result.startTime = timeToSeconds(timingParts[0]);
+                  result.endTime = timeToSeconds(timingParts[1]);
+                }
+              }
             }
+
+            results.push(result);
           }
         }
+      } else {
+        // Fall back to old approach for single entries
+        const number =
+          extractNestedTagContent(blockContent, "original_number") ||
+          extractNestedTagContent(blockContent, "number") ||
+          extractNestedTagContent(blockContent, "id");
 
-        results.push(result);
+        const english =
+          extractNestedTagContent(blockContent, "better_english_translation") ||
+          extractNestedTagContent(blockContent, "english_translation") ||
+          extractNestedTagContent(blockContent, "english");
+
+        const korean =
+          extractNestedTagContent(blockContent, "korean_translation") ||
+          extractNestedTagContent(blockContent, "korean");
+
+        if (number && (english || korean)) {
+          const result: ExtractedSubtitleData = {
+            number,
+            english: english || "",
+            korean: korean || "",
+          };
+
+          if (extractTimings) {
+            const timing =
+              extractNestedTagContent(blockContent, "original_timing") ||
+              extractNestedTagContent(blockContent, "timing");
+
+            if (timing) {
+              result.timing = timing;
+              const timingParts = timing.split(" --> ");
+              if (timingParts.length === 2) {
+                result.startTime = timeToSeconds(timingParts[0]);
+                result.endTime = timeToSeconds(timingParts[1]);
+              }
+            }
+          }
+
+          results.push(result);
+        }
       }
     }
   }
@@ -478,6 +544,37 @@ function extractFromMarkdownBlocks(
   }
 
   return results;
+}
+
+// Helper function to find all number/id tags in a block
+function findAllNumberTags(
+  content: string
+): { number: string; startPos: number; endPos: number }[] {
+  const results: { number: string; startPos: number; endPos: number }[] = [];
+
+  // Find all possible number tag variants
+  const patterns = [
+    /<original_number>(.*?)<\/original_number>/g,
+    /<number>(.*?)<\/number>/g,
+    /<id>(.*?)<\/id>/g,
+  ];
+
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(content)) !== null) {
+      const number = match[1].trim();
+      if (number && !isNaN(parseInt(number, 10))) {
+        results.push({
+          number,
+          startPos: match.index,
+          endPos: match.index + match[0].length,
+        });
+      }
+    }
+  }
+
+  // Sort by position in the document
+  return results.sort((a, b) => a.startPos - b.startPos);
 }
 
 // Helper function to extract all subline/subtitle tags from content
@@ -1521,25 +1618,64 @@ async function main() {
 
         // Add details for each failure
         debugContent += "\n## Detailed Failures\n\n";
+
+        // Organize failures by file to limit reporting
+        const fileDetailedFailures: Map<
+          string,
+          Map<number, ParsingFailure>
+        > = new Map();
+
+        // Group failures by file
         for (const [id, failure] of parsingFailures.entries()) {
-          debugContent += `### ID ${id}\n\n`;
-
           for (const fileInfo of failure.files) {
-            debugContent += `File: ${fileInfo.filename} (Part ${fileInfo.partNumber})\n`;
-            debugContent += `Found tag: ${
-              fileInfo.foundSublineTag ? "Yes" : "No"
-            }\n`;
-
-            if (fileInfo.sampleContent) {
-              debugContent += "Full content:\n```xml\n";
-              debugContent += fileInfo.sampleContent;
-              debugContent += "\n```\n";
+            const filename = fileInfo.filename;
+            if (!fileDetailedFailures.has(filename)) {
+              fileDetailedFailures.set(filename, new Map());
             }
+            fileDetailedFailures.get(filename)!.set(id, failure);
+          }
+        }
 
-            debugContent += "\n";
+        // Add detailed failures from each file (max 20 per file)
+        for (const [filename, failures] of fileDetailedFailures.entries()) {
+          debugContent += `## File: ${filename}\n\n`;
+
+          // Sort failures by ID for consistent ordering
+          const sortedFailures = Array.from(failures.entries()).sort(
+            (a, b) => a[0] - b[0]
+          );
+          const displayCount = Math.min(sortedFailures.length, 20);
+
+          // Display warning if limiting the output
+          if (sortedFailures.length > 20) {
+            debugContent += `**Note:** Showing ${displayCount} of ${sortedFailures.length} failures for this file\n\n`;
           }
 
-          debugContent += "---\n\n";
+          // Show the failures (limited to 20)
+          for (let i = 0; i < displayCount; i++) {
+            const [id, failure] = sortedFailures[i];
+            debugContent += `### ID ${id}\n\n`;
+
+            // Only include file info for this specific file
+            for (const fileInfo of failure.files) {
+              if (fileInfo.filename === filename) {
+                debugContent += `Part ${fileInfo.partNumber}\n`;
+                debugContent += `Found tag: ${
+                  fileInfo.foundSublineTag ? "Yes" : "No"
+                }\n`;
+
+                if (fileInfo.sampleContent) {
+                  debugContent += "Full content:\n```xml\n";
+                  debugContent += fileInfo.sampleContent;
+                  debugContent += "\n```\n";
+                }
+
+                debugContent += "\n";
+              }
+            }
+
+            debugContent += "---\n\n";
+          }
         }
 
         // Write debug info to file
