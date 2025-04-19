@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 
-import { readFileSync, writeFileSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { basename, join } from "path";
+import { parseArgs } from "util";
 
 // Define types
 interface TimeRange {
@@ -12,6 +14,43 @@ interface TimeRange {
 interface SubtitleBlock {
   id: string;
   content: string;
+}
+
+// Parse command line arguments
+const { values, positionals } = parseArgs({
+  args: Bun.argv.slice(2),
+  options: {
+    output: {
+      type: "string",
+      short: "o",
+      default: ".",
+    },
+    help: {
+      type: "boolean",
+      short: "h",
+    },
+  },
+  allowPositionals: true,
+});
+
+// Show help if requested or if no input file is provided
+if (values.help || positionals.length === 0) {
+  console.log(`
+Usage: bun split-srt.ts [options] <srt-file>
+
+Options:
+  -o, --output <directory>  Output directory for SRT chunks (default: current directory)
+  -h, --help                Show this help message
+  `);
+  process.exit(values.help ? 0 : 1);
+}
+
+const inputFile = positionals[0];
+const outputDir = values.output as string;
+
+// Create output directory if it doesn't exist
+if (!existsSync(outputDir)) {
+  mkdirSync(outputDir, { recursive: true });
 }
 
 // Parse SRT timestamp to seconds
@@ -44,8 +83,11 @@ function secondsToTime(totalSeconds: number): string {
 }
 
 // Read the original SRT file
-const inputFile = "Downloaded-Sandhesam.eng.srt";
+console.log(`Reading SRT file: ${inputFile}`);
 const content = readFileSync(inputFile, "utf-8");
+
+// Get base filename without extension for output files
+const baseFileName = basename(inputFile, ".srt").replace(/\.[^/.]+$/, "");
 
 // Parse the SRT content
 const subtitleBlocks: SubtitleBlock[] = [];
@@ -85,54 +127,36 @@ if (currentBlock.length > 0) {
   });
 }
 
-// Define the time ranges
-const timeRanges: TimeRange[] = [
-  {
-    start: timeToSeconds("00:00:00"),
-    end: timeToSeconds("00:20:00"),
-    filename: "Sandesham_audio_part1.srt",
-  },
-  {
-    start: timeToSeconds("00:15:00"),
-    end: timeToSeconds("00:35:00"),
-    filename: "Sandesham_audio_part2.srt",
-  },
-  {
-    start: timeToSeconds("00:30:00"),
-    end: timeToSeconds("00:50:00"),
-    filename: "Sandesham_audio_part3.srt",
-  },
-  {
-    start: timeToSeconds("00:45:00"),
-    end: timeToSeconds("01:05:00"),
-    filename: "Sandesham_audio_part4.srt",
-  },
-  {
-    start: timeToSeconds("01:00:00"),
-    end: timeToSeconds("01:20:00"),
-    filename: "Sandesham_audio_part5.srt",
-  },
-  {
-    start: timeToSeconds("01:15:00"),
-    end: timeToSeconds("01:35:00"),
-    filename: "Sandesham_audio_part6.srt",
-  },
-  {
-    start: timeToSeconds("01:30:00"),
-    end: timeToSeconds("01:50:00"),
-    filename: "Sandesham_audio_part7.srt",
-  },
-  {
-    start: timeToSeconds("01:45:00"),
-    end: timeToSeconds("02:05:00"),
-    filename: "Sandesham_audio_part8.srt",
-  },
-  {
-    start: timeToSeconds("02:00:00"),
-    end: timeToSeconds("02:19:30"),
-    filename: "Sandesham_audio_part9.srt",
-  },
-];
+console.log(`Parsed ${subtitleBlocks.length} subtitle blocks`);
+
+// Define the time ranges with 20 minute chunks and 5 minute overlaps
+const timeRanges: TimeRange[] = [];
+let startTime = 0;
+let partIndex = 1;
+
+// Calculate total duration from the last subtitle block
+const lastBlock = subtitleBlocks[subtitleBlocks.length - 1];
+const lastBlockLines = lastBlock.content.split("\n");
+const lastTimelineLine = lastBlockLines[1];
+const lastEndTime = timeToSeconds(lastTimelineLine.split(" --> ")[1]);
+const totalDuration = Math.ceil(lastEndTime / 60) * 60; // Round up to nearest minute
+
+while (startTime < totalDuration) {
+  const endTime = Math.min(startTime + 20 * 60, totalDuration); // 20 minute chunks
+  timeRanges.push({
+    start: startTime,
+    end: endTime,
+    filename: join(outputDir, `${baseFileName}_part${partIndex}.srt`),
+  });
+
+  startTime = endTime - 5 * 60; // 5 minute overlap
+  partIndex++;
+
+  // Break if we've reached the end
+  if (endTime >= totalDuration) break;
+}
+
+console.log(`Generated ${timeRanges.length} time ranges`);
 
 // Process each time range
 timeRanges.forEach((range) => {

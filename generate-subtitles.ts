@@ -4,36 +4,137 @@ import { readdir, readFile, writeFile, mkdir as fsMkdir } from "fs/promises";
 import { join } from "path";
 import { existsSync } from "fs";
 import chalk from "chalk";
+import { parseArgs } from "util";
 
-const PRIMARY_RESPONSES_DIR = "./videos/responses";
-const BACKUP_RESPONSES_DIR = "./videos/responses2"; // Optional backup
-const ORIGINAL_SRT = "./Downloaded-Sandhesam.eng.srt";
-const OUTPUT_DIR = "./videos/final_subtitles";
-const OUTPUT_SRT = "Sandesham_bilingual.srt";
+// Default paths (can be overridden via command line)
+const DEFAULT_PRIMARY_DIR = "./videos/responses";
+const DEFAULT_BACKUP_DIR = "./videos/responses2";
+const DEFAULT_ORIGINAL_SRT = "./Downloaded-Sandhesam.eng.srt";
+const DEFAULT_OUTPUT_DIR = "./videos/final_subtitles";
+const DEFAULT_OUTPUT_SRT = "Sandesham_bilingual.srt";
 
 // Color settings for subtitles
 const ENGLISH_COLOR = "FFFFFF"; // White
 const KOREAN_COLOR = "FFC0CB"; // Light pink
 
 // Parse command line arguments
-function parseArgs() {
-  const args = process.argv.slice(2);
-  let backupDir: string | null = null;
-  let useResponseTimings = false;
+const { values, positionals } = parseArgs({
+  args: Bun.argv.slice(2),
+  options: {
+    primary: {
+      type: "string",
+      short: "p",
+      default: DEFAULT_PRIMARY_DIR,
+    },
+    backup: {
+      type: "string",
+      short: "b",
+    },
+    original: {
+      type: "string",
+      short: "o",
+      default: DEFAULT_ORIGINAL_SRT,
+    },
+    output: {
+      type: "string",
+      short: "O",
+      default: DEFAULT_OUTPUT_DIR,
+    },
+    filename: {
+      type: "string",
+      short: "f",
+      default: DEFAULT_OUTPUT_SRT,
+    },
+    responsetimings: {
+      type: "boolean",
+      short: "r",
+      default: false,
+    },
+    colors: {
+      type: "string",
+      short: "c",
+    },
+    verbose: {
+      type: "boolean",
+      short: "v",
+      default: false,
+    },
+    markfallbacks: {
+      type: "boolean",
+      short: "m",
+      default: true,
+    },
+    debugfile: {
+      type: "string",
+      short: "d",
+    },
+    help: {
+      type: "boolean",
+      short: "h",
+    },
+  },
+  allowPositionals: true,
+});
 
-  // Check if backup directory is specified
-  const backupArg = args.find((arg) => arg.startsWith("--backup="));
-  if (backupArg) {
-    backupDir = backupArg.split("=")[1];
-  }
+// Show help if requested
+if (values.help) {
+  console.log(`
+Usage: bun generate-subtitles.ts [options]
 
-  // Check if we should use response timings instead of original SRT timings
-  if (args.includes("--use-response-timings")) {
-    useResponseTimings = true;
-  }
+Options:
+  -p, --primary <directory>    Primary responses directory (default: "${DEFAULT_PRIMARY_DIR}")
+  -b, --backup <directory>     Backup responses directory (uses "${DEFAULT_BACKUP_DIR}" if exists and not specified)
+  -o, --original <file>        Original SRT file (default: "${DEFAULT_ORIGINAL_SRT}")
+  -O, --output <directory>     Output directory (default: "${DEFAULT_OUTPUT_DIR}")
+  -f, --filename <filename>    Base output filename (default: "${DEFAULT_OUTPUT_SRT}")
+  -r, --responsetimings        Use timings from response files instead of original SRT
+  -c, --colors <colors>        Subtitle colors as "english,korean" (default: "${ENGLISH_COLOR},${KOREAN_COLOR}")
+  -v, --verbose                Show detailed parsing information
+  -m, --markfallbacks          Mark subtitles where original line is used as fallback (default: true)
+  -d, --debugfile <filename>   Output parsing debug info to this file
+  -h, --help                   Show this help message
 
-  return { backupDir, useResponseTimings };
+Examples:
+  bun generate-subtitles.ts
+  bun generate-subtitles.ts -p ./responses_v1 -b ./responses_v2
+  bun generate-subtitles.ts -r -c "FFFFFF,FFC0CB"
+  bun generate-subtitles.ts -f my_movie.srt -O ./output
+  `);
+  process.exit(0);
 }
+
+// Get values from parsed arguments
+const primaryDir = values.primary as string;
+const originalSrtPath = values.original as string;
+const outputDir = values.output as string;
+const baseOutputFilename = values.filename as string;
+const useResponseTimings = values.responsetimings as boolean;
+const verboseMode = values.verbose as boolean;
+const markFallbacks = values.markfallbacks as boolean;
+const debugFile = values.debugfile as string | undefined;
+
+// Handle backup directory
+let backupDir: string | null = null;
+if (values.backup) {
+  backupDir = values.backup as string;
+} else if (existsSync(DEFAULT_BACKUP_DIR)) {
+  // Use default backup if available and not explicitly overridden
+  backupDir = DEFAULT_BACKUP_DIR;
+}
+
+// Handle custom colors
+let englishColor = ENGLISH_COLOR;
+let koreanColor = KOREAN_COLOR;
+if (values.colors) {
+  const colors = (values.colors as string).split(",");
+  if (colors.length >= 2) {
+    englishColor = colors[0].trim();
+    koreanColor = colors[1].trim();
+  }
+}
+
+// Color settings for fallback indicator
+const FALLBACK_COLOR = "FF0000"; // Red for fallback indicator
 
 // Interface for original subtitle entries
 interface OriginalSubtitle {
@@ -56,12 +157,25 @@ interface TranslatedSubtitle {
   endTime?: number;
 }
 
+// Fixed type version for the extracted data
+interface ExtractedSubtitleData {
+  number: string;
+  english: string;
+  korean: string;
+  timing?: string;
+  startTime?: number;
+  endTime?: number;
+}
+
 // Interface for the final subtitle entry
 interface FinalSubtitle {
   id: number;
   timing: string;
   english: string;
   korean: string;
+  startTime: number;
+  endTime: number;
+  isFallback?: boolean;
 }
 
 // Interface for parsed SRT entry (used in validation)
@@ -71,6 +185,19 @@ interface ParsedSrtEntry {
   endTime: number;
   content: string;
 }
+
+// Store information about parsing failures
+interface ParsingFailure {
+  id: number;
+  files: {
+    filename: string;
+    partNumber: number;
+    foundSublineTag: boolean;
+    sampleContent?: string;
+  }[];
+}
+
+const parsingFailures: Map<number, ParsingFailure> = new Map();
 
 // Parse SRT timestamp to seconds
 function timeToSeconds(time: string): number {
@@ -156,81 +283,408 @@ async function parseResponseFile(
   const content = await readFile(filePath, "utf-8");
   const translations: TranslatedSubtitle[] = [];
 
-  // Check if the content is wrapped in a markdown code block
-  let processableContent = content;
-  const markdownBlockMatch = content.match(/```(?:xml)?\s*\n([\s\S]*?)```/);
-  if (markdownBlockMatch && markdownBlockMatch[1]) {
-    processableContent = markdownBlockMatch[1];
+  if (verboseMode) {
+    console.log(chalk.cyan(`Detailed parsing of ${filePath}:`));
   }
 
-  // Find all <subline> blocks
-  const sublineRegex = /<subline>([\s\S]*?)<\/subline>/g;
-  let match;
+  // APPROACH 1: Find all individual markdown code blocks (multiple blocks per file)
+  // This handles cases with multiple consecutive ```xml blocks
+  const markdownBlocksResults = extractFromMarkdownBlocks(
+    content,
+    extractTimings
+  );
 
-  while ((match = sublineRegex.exec(processableContent)) !== null) {
-    const sublineContent = match[1];
-
-    // Extract the components
-    function extractTagContent(content: string, tag: string): string | null {
-      const startTag = `<${tag}>`;
-      const endTag = `</${tag}>`;
-      const startIndex = content.indexOf(startTag);
-      if (startIndex === -1) return null;
-
-      const valueStartIndex = startIndex + startTag.length;
-      const endIndex = content.indexOf(endTag, valueStartIndex);
-      if (endIndex === -1) return null;
-
-      return content.substring(valueStartIndex, endIndex).trim();
+  if (markdownBlocksResults.length > 0) {
+    if (verboseMode) {
+      console.log(
+        `Found ${markdownBlocksResults.length} subtitle entries from markdown blocks`
+      );
     }
 
-    const number = extractTagContent(sublineContent, "original_number");
-    const english = extractTagContent(
-      sublineContent,
-      "better_english_translation"
-    );
-    const korean = extractTagContent(sublineContent, "korean_translation");
+    for (const result of markdownBlocksResults) {
+      translations.push({
+        ...result,
+        source: filePath,
+        partNumber,
+      });
+    }
+  } else {
+    // APPROACH 2: Find all variants of subtitle tags directly in content
+    const allSublineTags = getAllSublineTags(content);
 
-    // Also extract timing if requested
-    let timing: string | undefined = undefined;
-    let startTime: number | undefined = undefined;
-    let endTime: number | undefined = undefined;
+    if (allSublineTags.length > 0) {
+      if (verboseMode) {
+        console.log(
+          `Found ${allSublineTags.length} subtitle entries using direct tag extraction`
+        );
+      }
 
-    if (extractTimings) {
-      const timingValue = extractTagContent(sublineContent, "original_timing");
-      if (timingValue) {
-        timing = timingValue;
-        const timingParts = timing.split(" --> ");
-        if (timingParts.length === 2) {
-          startTime = timeToSeconds(timingParts[0]);
-          endTime = timeToSeconds(timingParts[1]);
+      for (const tagContent of allSublineTags) {
+        const extractedData = extractSubtitleData(tagContent, extractTimings);
+
+        if (extractedData && extractedData.number) {
+          translations.push({
+            ...extractedData,
+            source: filePath,
+            partNumber,
+          });
+        }
+      }
+    } else if (translations.length === 0) {
+      // APPROACH 3: Last resort regex pattern matching
+      if (verboseMode) {
+        console.log(`No direct tags found, trying regex patterns...`);
+      }
+
+      const originalResults = extractWithRegexPatterns(content, extractTimings);
+
+      if (originalResults.length > 0) {
+        if (verboseMode) {
+          console.log(
+            `Found ${originalResults.length} translations using regex patterns`
+          );
+        }
+
+        for (const result of originalResults) {
+          translations.push({
+            ...result,
+            source: filePath,
+            partNumber,
+          });
         }
       }
     }
+  }
 
-    if (number && (english || korean)) {
-      translations.push({
-        number,
-        english: english || "",
-        korean: korean || "",
-        source: filePath,
-        partNumber,
-        timing,
-        startTime,
-        endTime,
-      });
+  // Add debug information for suspiciously empty files
+  if (translations.length < 10 && partNumber > 1) {
+    console.log(
+      chalk.yellow(
+        `⚠️ WARNING: Found only ${translations.length} translations in part ${partNumber}.`
+      )
+    );
+
+    if (verboseMode) {
+      // Count potential translation blocks in the file
+      const potentialMatches = (content.match(/<(subline|subtitle)>/g) || [])
+        .length;
+      console.log(
+        `Found ${potentialMatches} potential <subline> or <subtitle> tags in the file`
+      );
+
+      // Count markdown blocks
+      const markdownBlocks = (content.match(/```(?:xml)?\s*\n/g) || []).length;
+      console.log(`Found ${markdownBlocks} markdown code blocks in the file`);
+
+      // Show content preview
+      console.log("File preview (first 500 chars):");
+      console.log("----------------------------------------");
+      console.log(content.substring(0, 500));
+      console.log("----------------------------------------");
+    }
+  } else {
+    if (verboseMode) {
+      console.log(
+        `Successfully parsed ${translations.length} translations from part ${partNumber}`
+      );
     }
   }
 
   return translations;
 }
 
+// Extract subtitles from markdown code blocks
+function extractFromMarkdownBlocks(
+  content: string,
+  extractTimings: boolean
+): ExtractedSubtitleData[] {
+  const results: ExtractedSubtitleData[] = [];
+
+  // Improved regex to handle consecutive markdown blocks better
+  // This looks for ```xml ... ``` blocks with or without whitespace between them
+  const markdownBlockRegex = /```(?:xml)?\s*\n([\s\S]*?)```/g;
+  let markdownMatch;
+  let markdownBlockCount = 0;
+
+  while ((markdownMatch = markdownBlockRegex.exec(content)) !== null) {
+    markdownBlockCount++;
+    const blockContent = markdownMatch[1].trim();
+
+    // Check if this block contains a subline/subtitle tag
+    if (
+      blockContent.includes("<subline>") ||
+      blockContent.includes("<subtitle>")
+    ) {
+      // Extract tags from this block
+      const tags = getAllSublineTags(blockContent);
+
+      for (const tagContent of tags) {
+        const extractedData = extractSubtitleData(tagContent, extractTimings);
+
+        if (extractedData && extractedData.number) {
+          results.push(extractedData);
+        }
+      }
+    }
+    // If the block itself IS the content of a subline (without the surrounding tags)
+    else {
+      // Try to find subtitle data directly in the block
+      // This handles cases where the markdown block contains tag content without the <subline> wrapper
+      const number =
+        extractNestedTagContent(blockContent, "original_number") ||
+        extractNestedTagContent(blockContent, "number") ||
+        extractNestedTagContent(blockContent, "id");
+
+      const english =
+        extractNestedTagContent(blockContent, "better_english_translation") ||
+        extractNestedTagContent(blockContent, "english_translation") ||
+        extractNestedTagContent(blockContent, "english");
+
+      const korean =
+        extractNestedTagContent(blockContent, "korean_translation") ||
+        extractNestedTagContent(blockContent, "korean");
+
+      if (number && (english || korean)) {
+        const result: ExtractedSubtitleData = {
+          number,
+          english: english || "",
+          korean: korean || "",
+        };
+
+        if (extractTimings) {
+          const timing =
+            extractNestedTagContent(blockContent, "original_timing") ||
+            extractNestedTagContent(blockContent, "timing");
+
+          if (timing) {
+            result.timing = timing;
+            const timingParts = timing.split(" --> ");
+            if (timingParts.length === 2) {
+              result.startTime = timeToSeconds(timingParts[0]);
+              result.endTime = timeToSeconds(timingParts[1]);
+            }
+          }
+        }
+
+        results.push(result);
+      }
+    }
+  }
+
+  if (verboseMode && markdownBlockCount > 0) {
+    console.log(
+      `Processed ${markdownBlockCount} markdown blocks, found ${results.length} valid subtitles`
+    );
+  }
+
+  return results;
+}
+
+// Helper function to extract all subline/subtitle tags from content
+function getAllSublineTags(content: string): string[] {
+  const results: string[] = [];
+
+  // Try different tag variants
+  const patterns = [
+    /<subline>([\s\S]*?)<\/subline>/g,
+    /<subtitle>([\s\S]*?)<\/subtitle>/g,
+    /<subl[^>]*>([\s\S]*?)<\/subl[^>]*>/g,
+  ];
+
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(content)) !== null) {
+      results.push(match[1]);
+    }
+  }
+
+  return results;
+}
+
+// Helper function to extract subtitle data from tag content
+function extractSubtitleData(
+  tagContent: string,
+  extractTimings: boolean
+): ExtractedSubtitleData | null {
+  // Extract the components
+  const number =
+    extractNestedTagContent(tagContent, "original_number") ||
+    extractNestedTagContent(tagContent, "number") ||
+    extractNestedTagContent(tagContent, "id");
+
+  const english =
+    extractNestedTagContent(tagContent, "better_english_translation") ||
+    extractNestedTagContent(tagContent, "english_translation") ||
+    extractNestedTagContent(tagContent, "english");
+
+  const korean =
+    extractNestedTagContent(tagContent, "korean_translation") ||
+    extractNestedTagContent(tagContent, "korean");
+
+  // Skip if we don't have the bare minimum data
+  if (!number || (!english && !korean)) {
+    return null;
+  }
+
+  const result: ExtractedSubtitleData = {
+    number,
+    english: english || "",
+    korean: korean || "",
+  };
+
+  // Add timing if requested and available
+  if (extractTimings) {
+    const timingValue =
+      extractNestedTagContent(tagContent, "original_timing") ||
+      extractNestedTagContent(tagContent, "timing");
+
+    if (timingValue) {
+      result.timing = timingValue;
+      const timingParts = timingValue.split(" --> ");
+      if (timingParts.length === 2) {
+        result.startTime = timeToSeconds(timingParts[0]);
+        result.endTime = timeToSeconds(timingParts[1]);
+      }
+    }
+  }
+
+  return result;
+}
+
+// Extract content from nested tags with multiple possible tag names
+function extractNestedTagContent(
+  content: string,
+  tagNames: string | string[]
+): string | null {
+  if (!Array.isArray(tagNames)) {
+    tagNames = [tagNames];
+  }
+
+  for (const tagName of tagNames) {
+    const startTag = `<${tagName}>`;
+    const endTag = `</${tagName}>`;
+    const startIndex = content.indexOf(startTag);
+
+    if (startIndex === -1) continue;
+
+    const valueStartIndex = startIndex + startTag.length;
+    const endIndex = content.indexOf(endTag, valueStartIndex);
+
+    if (endIndex === -1) continue;
+
+    return content.substring(valueStartIndex, endIndex).trim();
+  }
+
+  return null;
+}
+
+// Extract with multiple regex patterns as a last resort
+function extractWithRegexPatterns(
+  content: string,
+  extractTimings: boolean
+): ExtractedSubtitleData[] {
+  const results: ExtractedSubtitleData[] = [];
+
+  // Look for patterns like: <original_number>123</original_number> anywhere in the file
+  const numberMatches =
+    content.match(
+      /<(?:original_number|number|id)>(\d+)<\/(?:original_number|number|id)>/g
+    ) || [];
+
+  // For each number, try to extract associated translations
+  for (const numberMatch of numberMatches) {
+    const numberRegex =
+      /<(?:original_number|number|id)>(\d+)<\/(?:original_number|number|id)>/;
+    const numberExtract = numberMatch.match(numberRegex);
+
+    if (!numberExtract || !numberExtract[1]) continue;
+
+    const number = numberExtract[1];
+    const surroundingText = extractSurroundingText(content, numberMatch, 500);
+
+    // Extract english and korean translations from surrounding text
+    const english = extractFromSurrounding(surroundingText, [
+      "better_english_translation",
+      "english_translation",
+      "english",
+    ]);
+
+    const korean = extractFromSurrounding(surroundingText, [
+      "korean_translation",
+      "korean",
+    ]);
+
+    if (!english && !korean) continue;
+
+    const result: ExtractedSubtitleData = {
+      number,
+      english: english || "",
+      korean: korean || "",
+    };
+
+    // Add timing if requested
+    if (extractTimings) {
+      const timing = extractFromSurrounding(surroundingText, [
+        "original_timing",
+        "timing",
+      ]);
+
+      if (timing) {
+        result.timing = timing;
+        const timingParts = timing.split(" --> ");
+        if (timingParts.length === 2) {
+          result.startTime = timeToSeconds(timingParts[0]);
+          result.endTime = timeToSeconds(timingParts[1]);
+        }
+      }
+    }
+
+    results.push(result);
+  }
+
+  return results;
+}
+
+// Helper to extract text surrounding a match
+function extractSurroundingText(
+  content: string,
+  match: string,
+  radius: number
+): string {
+  const matchIndex = content.indexOf(match);
+  if (matchIndex === -1) return "";
+
+  const start = Math.max(0, matchIndex - radius);
+  const end = Math.min(content.length, matchIndex + match.length + radius);
+
+  return content.substring(start, end);
+}
+
+// Helper to extract tag content from surrounding text
+function extractFromSurrounding(
+  text: string,
+  tagNames: string[]
+): string | null {
+  for (const tagName of tagNames) {
+    const regex = new RegExp(`<${tagName}>(.*?)<\/${tagName}>`, "s");
+    const match = text.match(regex);
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+  }
+  return null;
+}
+
 // Process all response files and merge translations
 async function processResponseFiles(
   directories: string[],
-  extractTimings: boolean
+  extractTimings: boolean,
+  originalSubtitleIds: number[]
 ): Promise<Map<string, TranslatedSubtitle>> {
   const allTranslations = new Map<string, TranslatedSubtitle>();
+  const checkedSubtitleIds = new Set<number>();
+  const directoryScores: Map<string, { total: number; found: number }> =
+    new Map();
 
   for (const directory of directories) {
     if (!existsSync(directory)) {
@@ -241,6 +695,7 @@ async function processResponseFiles(
     }
 
     console.log(chalk.cyan(`Processing response files from: ${directory}`));
+    directoryScores.set(directory, { total: 0, found: 0 });
 
     // Get all response files in this directory
     const files = await readdir(directory);
@@ -271,13 +726,71 @@ async function processResponseFiles(
       const filePath = join(directory, file);
 
       console.log(`Parsing ${file}...`);
-      const translations = await parseResponseFile(
+      const { translations, parsedIds } = await parseResponseFileWithTracking(
         filePath,
         partNumber,
-        extractTimings
+        extractTimings,
+        originalSubtitleIds
       );
 
+      // Track which IDs were found and which weren't
+      const dirScore = directoryScores.get(directory)!;
+      const relevantIds = originalSubtitleIds.filter((id) => {
+        // Determine if this file should contain this ID based on part ranges
+        // This is a simplified check - you might need more sophisticated logic
+        const idNum = parseInt(String(id), 10);
+        const fileStartIndex = (partNumber - 1) * 300; // Assuming each part has roughly 300 subtitles
+        const fileEndIndex = fileStartIndex + 400; // Add overlap
+        return idNum >= fileStartIndex && idNum <= fileEndIndex;
+      });
+
+      dirScore.total += relevantIds.length;
+      dirScore.found += parsedIds.size;
+
       console.log(`Found ${translations.length} translations in ${file}`);
+
+      // Record which IDs weren't found in this file that should have been
+      for (const id of relevantIds) {
+        checkedSubtitleIds.add(id);
+        if (!parsedIds.has(id)) {
+          // This ID should be in this file but wasn't found
+          const failure = parsingFailures.get(id) || {
+            id,
+            files: [],
+          };
+
+          // Check if the file contains a subline tag for this ID
+          const fileContent = await readFile(filePath, "utf-8");
+          const searchPattern = new RegExp(
+            `<(?:subline|subtitle)>[\\s\\S]*?<(?:original_number|number|id)>${id}<\/(?:original_number|number|id)>[\\s\\S]*?<\/(?:subline|subtitle)>`,
+            "i"
+          );
+
+          const foundSublineTag = searchPattern.test(fileContent);
+          const failureInfo: {
+            filename: string;
+            partNumber: number;
+            foundSublineTag: boolean;
+            sampleContent?: string;
+          } = {
+            filename: file,
+            partNumber,
+            foundSublineTag,
+          };
+
+          // If we found a tag but couldn't parse it, extract a sample
+          if (foundSublineTag) {
+            const match = fileContent.match(searchPattern);
+            if (match) {
+              // Store the full tag content without truncation
+              failureInfo.sampleContent = match[0];
+            }
+          }
+
+          failure.files.push(failureInfo);
+          parsingFailures.set(id, failure);
+        }
+      }
 
       // Add to our merged map, preferring lower part numbers for overlaps
       for (const translation of translations) {
@@ -291,7 +804,121 @@ async function processResponseFiles(
     }
   }
 
+  // Print directory parsing scores
+  console.log(chalk.cyan("\nDirectory Parsing Success Rates:"));
+  for (const [dir, score] of directoryScores.entries()) {
+    const successRate = score.total
+      ? Math.round((score.found / score.total) * 100)
+      : 0;
+    console.log(
+      `${dir}: ${successRate}% (found ${score.found} of ${score.total} relevant subtitles)`
+    );
+  }
+
   return allTranslations;
+}
+
+// Enhanced version of parseResponseFile that tracks which IDs were found
+async function parseResponseFileWithTracking(
+  filePath: string,
+  partNumber: number,
+  extractTimings: boolean,
+  originalSubtitleIds: number[]
+): Promise<{ translations: TranslatedSubtitle[]; parsedIds: Set<number> }> {
+  const content = await readFile(filePath, "utf-8");
+  const translations: TranslatedSubtitle[] = [];
+  const parsedIds = new Set<number>();
+
+  if (verboseMode) {
+    console.log(chalk.cyan(`Detailed parsing of ${filePath}:`));
+  }
+
+  // APPROACH 1: Find all individual markdown code blocks (multiple blocks per file)
+  // This handles cases with multiple consecutive ```xml blocks
+  const markdownBlocksResults = extractFromMarkdownBlocks(
+    content,
+    extractTimings
+  );
+
+  if (markdownBlocksResults.length > 0) {
+    if (verboseMode) {
+      console.log(
+        `Found ${markdownBlocksResults.length} subtitle entries from markdown blocks`
+      );
+    }
+
+    for (const result of markdownBlocksResults) {
+      translations.push({
+        ...result,
+        source: filePath,
+        partNumber,
+      });
+
+      // Track which IDs were parsed successfully
+      const id = parseInt(result.number, 10);
+      if (!isNaN(id)) {
+        parsedIds.add(id);
+      }
+    }
+  } else {
+    // APPROACH 2: Find all variants of subtitle tags directly in content
+    const allSublineTags = getAllSublineTags(content);
+
+    if (allSublineTags.length > 0) {
+      if (verboseMode) {
+        console.log(
+          `Found ${allSublineTags.length} subtitle entries using direct tag extraction`
+        );
+      }
+
+      for (const tagContent of allSublineTags) {
+        const extractedData = extractSubtitleData(tagContent, extractTimings);
+
+        if (extractedData && extractedData.number) {
+          translations.push({
+            ...extractedData,
+            source: filePath,
+            partNumber,
+          });
+
+          const id = parseInt(extractedData.number, 10);
+          if (!isNaN(id)) {
+            parsedIds.add(id);
+          }
+        }
+      }
+    } else if (translations.length === 0) {
+      // APPROACH 3: Last resort regex pattern matching
+      if (verboseMode) {
+        console.log(`No direct tags found, trying regex patterns...`);
+      }
+
+      const originalResults = extractWithRegexPatterns(content, extractTimings);
+
+      if (originalResults.length > 0) {
+        if (verboseMode) {
+          console.log(
+            `Found ${originalResults.length} translations using regex patterns`
+          );
+        }
+
+        for (const result of originalResults) {
+          translations.push({
+            ...result,
+            source: filePath,
+            partNumber,
+          });
+
+          const id = parseInt(result.number, 10);
+          if (!isNaN(id)) {
+            parsedIds.add(id);
+          }
+        }
+      }
+    }
+  }
+
+  return { translations, parsedIds };
 }
 
 // Generate the final SRT file with colored subtitles
@@ -302,6 +929,8 @@ async function generateFinalSrt(
 ): Promise<string> {
   const finalSubtitles: FinalSubtitle[] = [];
   let responseTimingsUsed = 0;
+  let fallbackCount = 0;
+  let markedFallbacks = 0;
 
   // Match original subtitles with translations
   for (const [id, originalSub] of originalSubtitles.entries()) {
@@ -320,7 +949,15 @@ async function generateFinalSrt(
         timing,
         english: translation.english || originalSub.content,
         korean: translation.korean || "",
+        startTime: timeToSeconds(timing.split(" --> ")[0]),
+        endTime: timeToSeconds(timing.split(" --> ")[1]),
+        isFallback: translation.english ? false : true, // Mark as fallback if no translated English
       });
+
+      // Count if we had to fall back to original content
+      if (!translation.english) {
+        fallbackCount++;
+      }
     } else {
       // Use original content if no translation found
       finalSubtitles.push({
@@ -328,7 +965,11 @@ async function generateFinalSrt(
         timing: originalSub.timing,
         english: originalSub.content,
         korean: "",
+        startTime: originalSub.startTime,
+        endTime: originalSub.endTime,
+        isFallback: true, // Mark as fallback since no translation was found
       });
+      fallbackCount++;
     }
   }
 
@@ -338,19 +979,101 @@ async function generateFinalSrt(
     );
   }
 
-  // Sort by ID and renumber
+  if (fallbackCount > 0) {
+    console.log(
+      chalk.yellow(
+        `Using original content as fallback for ${fallbackCount} subtitles`
+      )
+    );
+  }
+
+  // Sort by start time to handle overlaps
+  finalSubtitles.sort((a, b) => a.startTime - b.startTime);
+
+  // Fix overlapping subtitles
+  let overlapsFixed = 0;
+  for (let i = 0; i < finalSubtitles.length - 1; i++) {
+    const current = finalSubtitles[i];
+    const next = finalSubtitles[i + 1];
+
+    if (current.endTime > next.startTime) {
+      // Calculate new end time: 0.5 seconds before next subtitle starts or 5 seconds from start, whichever is shorter
+      const maxDuration = 5; // 5 seconds maximum subtitle duration
+      const gapBeforeNext = 0.5; // 0.5 second gap before next subtitle
+
+      const endOption1 = next.startTime - gapBeforeNext; // 0.5 seconds before next starts
+      const endOption2 = current.startTime + maxDuration; // 5 seconds from start
+
+      const newEndTime = Math.min(endOption1, endOption2);
+
+      // Only adjust if it would actually make the subtitle shorter
+      if (newEndTime < current.endTime) {
+        const originalEndTime = current.endTime;
+        current.endTime = newEndTime;
+
+        // Update the timing string
+        current.timing = `${secondsToTimestamp(
+          current.startTime
+        )} --> ${secondsToTimestamp(current.endTime)}`;
+
+        overlapsFixed++;
+
+        // Debugging details for first 5 fixed overlaps
+        if (overlapsFixed <= 5) {
+          console.log(
+            chalk.yellow(`Fixed overlap for subtitle #${current.id}:`)
+          );
+          console.log(
+            `  Original: ${secondsToTimestamp(
+              current.startTime
+            )} --> ${secondsToTimestamp(originalEndTime)}`
+          );
+          console.log(
+            `  Adjusted: ${secondsToTimestamp(
+              current.startTime
+            )} --> ${secondsToTimestamp(current.endTime)}`
+          );
+        }
+      }
+    }
+  }
+
+  if (overlapsFixed > 0) {
+    console.log(chalk.green(`Fixed ${overlapsFixed} overlapping subtitles`));
+    if (overlapsFixed > 5) {
+      console.log(`(Showed details for first 5 overlaps)`);
+    }
+  }
+
+  // Now sort by ID and renumber for the final output
   finalSubtitles.sort((a, b) => a.id - b.id);
 
   // Generate the SRT content with colored text
   let srtContent = "";
   let newId = 1;
+  const fallbackSamples: string[] = [];
 
   for (const sub of finalSubtitles) {
     // Format the subtitle text with colors
     let subtitleText = "";
 
     if (sub.english) {
-      subtitleText += `<font color="#${ENGLISH_COLOR}">${sub.english}</font>`;
+      if (markFallbacks && sub.isFallback) {
+        // Mark fallback subtitles with a special prefix and/or color
+        subtitleText += `<font color="#${englishColor}">[⚠ Original] ${sub.english}</font>`;
+        markedFallbacks++;
+
+        // Collect a few samples of marked fallbacks for verification
+        if (fallbackSamples.length < 3) {
+          fallbackSamples.push(
+            `ID #${sub.id}: [⚠ Original] ${sub.english.substring(0, 30)}${
+              sub.english.length > 30 ? "..." : ""
+            }`
+          );
+        }
+      } else {
+        subtitleText += `<font color="#${englishColor}">${sub.english}</font>`;
+      }
     }
 
     if (sub.english && sub.korean) {
@@ -358,12 +1081,25 @@ async function generateFinalSrt(
     }
 
     if (sub.korean) {
-      subtitleText += `<font color="#${KOREAN_COLOR}">${sub.korean}</font>`;
+      subtitleText += `<font color="#${koreanColor}">${sub.korean}</font>`;
     }
 
     // Add to SRT content
     srtContent += `${newId}\n${sub.timing}\n${subtitleText}\n\n`;
     newId++;
+  }
+
+  // Show marker usage summary
+  if (markFallbacks) {
+    console.log(
+      chalk.cyan(`Added fallback markers to ${markedFallbacks} subtitles`)
+    );
+    if (fallbackSamples.length > 0) {
+      console.log("Sample fallback markers:");
+      fallbackSamples.forEach((sample) => console.log(`  ${sample}`));
+    }
+  } else {
+    console.log("Fallback marking is disabled");
   }
 
   return srtContent;
@@ -572,43 +1308,79 @@ async function validateGeneratedSrt(
 
 async function main() {
   try {
-    // Parse command line arguments
-    const { backupDir, useResponseTimings } = parseArgs();
+    // Print configuration information
+    console.log(chalk.cyan("Configuration:"));
+    console.log(`- Primary directory: ${primaryDir}`);
+    if (backupDir) {
+      console.log(`- Backup directory: ${backupDir}`);
+    }
+    console.log(`- Original SRT: ${originalSrtPath}`);
+    console.log(`- Output directory: ${outputDir}`);
+    console.log(`- Base output filename: ${baseOutputFilename}`);
+    console.log(`- Response timings: ${useResponseTimings ? "Yes" : "No"}`);
+    console.log(
+      `- Subtitle colors: English=#${englishColor}, Korean=#${koreanColor}`
+    );
 
     // Create output directory if it doesn't exist
-    if (!existsSync(OUTPUT_DIR)) {
-      await fsMkdir(OUTPUT_DIR, { recursive: true });
-      console.log(`Created output directory: ${OUTPUT_DIR}`);
+    if (!existsSync(outputDir)) {
+      await fsMkdir(outputDir, { recursive: true });
+      console.log(`Created output directory: ${outputDir}`);
     }
 
     // Directories to process
-    const directories = [PRIMARY_RESPONSES_DIR];
-    if (backupDir) {
-      directories.push(backupDir);
-      console.log(chalk.cyan(`Using backup directory: ${backupDir}`));
-    } else if (existsSync(BACKUP_RESPONSES_DIR)) {
-      directories.push(BACKUP_RESPONSES_DIR);
+    const directories: string[] = [];
+
+    // Add primary directory if it exists
+    if (existsSync(primaryDir)) {
+      directories.push(primaryDir);
+      console.log(chalk.cyan(`Using primary directory: ${primaryDir}`));
+    } else {
       console.log(
-        chalk.cyan(`Using default backup directory: ${BACKUP_RESPONSES_DIR}`)
+        chalk.yellow(`Primary directory ${primaryDir} not found, skipping`)
       );
     }
 
-    // Log timing mode
-    if (useResponseTimings) {
-      console.log(
-        chalk.cyan("Using timings from response files instead of original SRT")
+    // Add backup directory if specified and exists
+    if (backupDir) {
+      if (existsSync(backupDir)) {
+        directories.push(backupDir);
+        console.log(chalk.cyan(`Using backup directory: ${backupDir}`));
+      } else {
+        console.log(
+          chalk.yellow(`Backup directory ${backupDir} not found, skipping`)
+        );
+      }
+    }
+
+    // Check if we have at least one valid directory
+    if (directories.length === 0) {
+      console.error(
+        chalk.red(
+          "❌ Error: No valid response directories found. Please check your paths."
+        )
       );
-    } else {
-      console.log(chalk.cyan("Using timings from original SRT file (default)"));
+      process.exit(1);
     }
 
     // Parse the original SRT file
-    const originalSubtitles = await parseOriginalSrt(ORIGINAL_SRT);
+    if (!existsSync(originalSrtPath)) {
+      console.error(
+        chalk.red(`❌ Error: Original SRT file not found: ${originalSrtPath}`)
+      );
+      process.exit(1);
+    }
+
+    const originalSubtitles = await parseOriginalSrt(originalSrtPath);
+
+    // Get a list of all original subtitle IDs
+    const originalSubtitleIds = Array.from(originalSubtitles.keys());
 
     // Process all response files and merge translations
     const translations = await processResponseFiles(
       directories,
-      useResponseTimings
+      useResponseTimings,
+      originalSubtitleIds
     );
     console.log(
       chalk.green(`Found translations for ${translations.size} subtitles`)
@@ -639,6 +1411,36 @@ async function main() {
       }
     }
 
+    // Generate output filename based on parameters
+    let outputFilename = baseOutputFilename;
+
+    // Add timing source indicator
+    if (useResponseTimings) {
+      // Split the filename to insert suffix before extension
+      const filenameParts = outputFilename.split(".");
+      if (filenameParts.length > 1) {
+        const extension = filenameParts.pop();
+        outputFilename = filenameParts.join(".") + "_resp_timing." + extension;
+      } else {
+        outputFilename = outputFilename + "_resp_timing";
+      }
+    }
+
+    // Add directory identifiers to filename if using non-default directories
+    if (primaryDir !== DEFAULT_PRIMARY_DIR) {
+      const primaryDirName = primaryDir.split("/").pop() || "custom";
+
+      // Split the filename to insert suffix before extension
+      const filenameParts = outputFilename.split(".");
+      if (filenameParts.length > 1) {
+        const extension = filenameParts.pop();
+        outputFilename =
+          filenameParts.join(".") + "_" + primaryDirName + "." + extension;
+      } else {
+        outputFilename = outputFilename + "_" + primaryDirName;
+      }
+    }
+
     // Generate the final SRT file
     const srtContent = await generateFinalSrt(
       originalSubtitles,
@@ -646,13 +1448,8 @@ async function main() {
       useResponseTimings
     );
 
-    // Determine output filename based on timing source
-    const outputFilename = useResponseTimings
-      ? OUTPUT_SRT.replace(".srt", "_resp_timing.srt")
-      : OUTPUT_SRT;
-
     // Write to output file
-    const outputPath = join(OUTPUT_DIR, outputFilename);
+    const outputPath = join(outputDir, outputFilename);
     await writeFile(outputPath, srtContent);
 
     console.log(
@@ -667,8 +1464,121 @@ async function main() {
       }`
     );
 
+    if (backupDir) {
+      console.log(`  - Using directories: ${primaryDir}, ${backupDir}`);
+    } else {
+      console.log(`  - Using directory: ${primaryDir}`);
+    }
+
     // Validate the generated SRT file
     await validateGeneratedSrt(outputPath, originalSubtitles);
+
+    // Output parsing failures to debug file or console
+    const failuresCount = parsingFailures.size;
+
+    if (failuresCount > 0) {
+      console.log(
+        chalk.yellow(
+          `\n🔍 Found ${failuresCount} subtitles with parsing issues`
+        )
+      );
+
+      // Group failures by file to identify problematic files
+      const fileFailures: Map<string, number[]> = new Map();
+      for (const [id, failure] of parsingFailures.entries()) {
+        for (const fileInfo of failure.files) {
+          const key = fileInfo.filename;
+          if (!fileFailures.has(key)) {
+            fileFailures.set(key, []);
+          }
+          fileFailures.get(key)!.push(id);
+        }
+      }
+
+      // Show files with the most failures
+      console.log(chalk.yellow("Files with the most parsing failures:"));
+      const sortedFiles = Array.from(fileFailures.entries())
+        .sort((a, b) => b[1].length - a[1].length)
+        .slice(0, 5);
+
+      for (const [file, ids] of sortedFiles) {
+        console.log(`  ${file}: ${ids.length} failures`);
+      }
+
+      // Generate detailed debug info if requested
+      if (debugFile) {
+        let debugContent = "# Subtitle Parsing Failures Report\n\n";
+        debugContent += `Generated: ${new Date().toISOString()}\n\n`;
+        debugContent += `Total failures: ${failuresCount}\n\n`;
+
+        // Add file summary
+        debugContent += "## Problem Files\n\n";
+        for (const [file, ids] of fileFailures.entries()) {
+          debugContent += `- ${file}: ${ids.length} failures (IDs: ${ids
+            .slice(0, 10)
+            .join(", ")}${ids.length > 10 ? "..." : ""})\n`;
+        }
+
+        // Add details for each failure
+        debugContent += "\n## Detailed Failures\n\n";
+        for (const [id, failure] of parsingFailures.entries()) {
+          debugContent += `### ID ${id}\n\n`;
+
+          for (const fileInfo of failure.files) {
+            debugContent += `File: ${fileInfo.filename} (Part ${fileInfo.partNumber})\n`;
+            debugContent += `Found tag: ${
+              fileInfo.foundSublineTag ? "Yes" : "No"
+            }\n`;
+
+            if (fileInfo.sampleContent) {
+              debugContent += "Full content:\n```xml\n";
+              debugContent += fileInfo.sampleContent;
+              debugContent += "\n```\n";
+            }
+
+            debugContent += "\n";
+          }
+
+          debugContent += "---\n\n";
+        }
+
+        // Write debug info to file
+        const debugPath = join(outputDir, debugFile);
+        await writeFile(debugPath, debugContent);
+        console.log(
+          chalk.green(`✅ Saved detailed parsing debug info to: ${debugPath}`)
+        );
+      } else if (verboseMode) {
+        // Show sample failures in verbose mode
+        console.log("\nSample parsing failures (first 3):");
+        let count = 0;
+        for (const [id, failure] of parsingFailures.entries()) {
+          if (count >= 3) break;
+          console.log(`\nID ${id}:`);
+
+          for (const fileInfo of failure.files) {
+            console.log(
+              `  File: ${fileInfo.filename} (Part ${fileInfo.partNumber})`
+            );
+            console.log(
+              `  Found tag: ${fileInfo.foundSublineTag ? "Yes" : "No"}`
+            );
+
+            if (fileInfo.sampleContent) {
+              console.log("  Content:");
+              // Show full content in verbose mode, but format for console viewing
+              const formattedContent = fileInfo.sampleContent.replace(
+                /\n/g,
+                "\n  "
+              ); // Indent each line for readability
+              console.log(`  ${formattedContent}`);
+            }
+          }
+
+          count++;
+        }
+      }
+    }
   } catch (error) {
     console.error(chalk.red("❌ Error:"), error);
   }

@@ -6,35 +6,96 @@ import { join } from "path";
 import { existsSync } from "fs";
 import * as cliProgress from "cli-progress";
 import chalk from "chalk";
+import { Anthropic } from "@anthropic-ai/sdk";
+import { parseArgs } from "util";
 
-const PROMPTS_DIR = "./videos/prompts";
-const DEFAULT_RESPONSES_DIR = "./videos/responses";
-// Maximum number of parallel requests to make at once
-const MAX_PARALLEL = 10;
+// Supported models
+const MODELS = {
+  GEMINI_PRO: "gemini-2.5-pro-preview-03-25",
+  GEMINI_FLASH: "gemini-2.5-flash-preview-0514",
+  CLAUDE_SONNET: "claude-3-7-sonnet-latest",
+};
 
 // Parse command line arguments
-function parseArgs() {
-  const args = process.argv.slice(2);
-  let partNumbers: number[] = [];
-  let outputDir = DEFAULT_RESPONSES_DIR;
+const { values, positionals } = parseArgs({
+  args: Bun.argv.slice(2),
+  options: {
+    input: {
+      type: "string",
+      short: "i",
+      default: "./videos/prompts",
+    },
+    output: {
+      type: "string",
+      short: "o",
+      default: "./videos/responses",
+    },
+    model: {
+      type: "string",
+      short: "m",
+      default: "gemini-pro",
+    },
+    parts: {
+      type: "string",
+      short: "p",
+    },
+    concurrent: {
+      type: "string",
+      short: "c",
+      default: "10",
+    },
+    help: {
+      type: "boolean",
+      short: "h",
+    },
+  },
+  allowPositionals: true,
+});
 
-  // Check if specific part numbers are requested
-  const partArg = args.find((arg) => arg.startsWith("--parts="));
-  if (partArg) {
-    const partsStr = partArg.split("=")[1];
-    partNumbers = partsStr
-      .split(",")
-      .map((num) => parseInt(num.trim(), 10))
-      .filter((num) => !isNaN(num));
-  }
+// Show help if requested
+if (values.help) {
+  console.log(`
+Usage: bun process-prompts.ts [options]
 
-  // Check if output directory is specified
-  const outputArg = args.find((arg) => arg.startsWith("--output="));
-  if (outputArg) {
-    outputDir = outputArg.split("=")[1];
-  }
+Options:
+  -i, --input <directory>      Input directory with prompt files (default: "./videos/prompts")
+  -o, --output <directory>     Output directory for responses (default: "./videos/responses")
+  -m, --model <name>           AI model to use (default: "gemini-pro")
+                               Supported models: gemini-pro, gemini-flash, claude-sonnet
+  -p, --parts <numbers>        Process only specific parts (comma-separated, e.g. "1,2,3")
+  -c, --concurrent <number>    Maximum concurrent requests (default: "10")
+  -h, --help                   Show this help message
+  `);
+  process.exit(0);
+}
 
-  return { partNumbers, outputDir };
+const PROMPTS_DIR = values.input as string;
+const RESPONSES_DIR = values.output as string;
+const MAX_PARALLEL = parseInt(values.concurrent as string, 10) || 10;
+
+// Parse parts to process
+let partNumbers: number[] = [];
+if (values.parts) {
+  partNumbers = (values.parts as string)
+    .split(",")
+    .map((num) => parseInt(num.trim(), 10))
+    .filter((num) => !isNaN(num));
+}
+
+// Determine which model to use
+let selectedModel = MODELS.GEMINI_PRO; // Default model
+const modelArg = (values.model as string).toLowerCase();
+
+if (modelArg.includes("flash")) {
+  selectedModel = MODELS.GEMINI_FLASH;
+} else if (modelArg.includes("claude") || modelArg.includes("sonnet")) {
+  selectedModel = MODELS.CLAUDE_SONNET;
+} else if (modelArg.includes("pro")) {
+  selectedModel = MODELS.GEMINI_PRO;
+} else {
+  console.log(
+    chalk.yellow(`Unknown model: ${modelArg}, using default ${selectedModel}`)
+  );
 }
 
 // Create a multi-bar container for handling multiple progress bars
@@ -47,29 +108,27 @@ const multibar = new cliProgress.MultiBar(
   cliProgress.Presets.shades_classic
 );
 
-async function processPrompt(
-  promptPath: string,
+async function processPromptWithGemini(
+  promptContent: string,
   apiKey: string,
-  filename: string
-): Promise<{ text: string; filename: string }> {
-  // Read the prompt file
-  const promptContent = await readFile(promptPath, "utf-8");
-
+  modelName: string
+): Promise<string> {
   // Initialize the Gemini API
-  const ai = new GoogleGenAI({
-    apiKey,
-  });
+  const ai = new GoogleGenAI({ apiKey });
 
-  console.log(chalk.yellow(`Starting processing for: ${filename}`));
+  // prettier-ignore
+  const kiwico =
+`
+Some notes for the english translation:
+The consumer for English is from new zealand. If you can use cultural references, see if it's possible to change the tone (english doesn't have honorifics but you can use different diction to change how people speak to convey the intent and tone that's not actually present in the text. Feel free to be creative and take a lot of creative license.
 
-  // Use Gemini 2.5 Pro model
-  const modelName = "gemini-2.5-pro-preview-03-25";
+`;
 
   // Send prompt to Gemini
   const contents = [
     {
       role: "user",
-      parts: [{ text: promptContent }],
+      parts: [{ text: promptContent + kiwico }],
     },
   ];
 
@@ -78,53 +137,159 @@ async function processPrompt(
     contents,
   });
 
-  // Create a progress bar for this specific file
-  const progressBar = multibar.create(100, 0, { filename });
-
-  // Track chunks and estimate progress
-  let chunkCount = 0;
-  const updateInterval = 3; // Update progress every 3 chunks
-
   // Collect the streamed response
   let fullResponse = "";
   for await (const chunk of response) {
     fullResponse += chunk.text;
-    chunkCount++;
-
-    // Update progress bar
-    if (chunkCount % updateInterval === 0) {
-      // We don't know the total, so simulate progress
-      const value = Math.min(chunkCount, 100);
-      progressBar.update(value);
-    }
   }
 
-  // Complete the progress bar
-  progressBar.update(100);
+  return fullResponse;
+}
 
-  return { text: fullResponse, filename };
+async function processPromptWithClaude(
+  promptContent: string,
+  apiKey: string
+): Promise<string> {
+  const client = new Anthropic({ apiKey });
+
+  // prettier-ignore
+  const kiwico =
+`
+Some notes for the english translation:
+The consumer for English is from new zealand. If you can use cultural references, see if it's possible to change the tone (english doesn't have honorifics but you can use different diction to change how people speak to convey the intent and tone that's not actually present in the text. Feel free to be creative and take a lot of creative license.
+
+`;
+
+  const message = await client.messages.create({
+    model: MODELS.CLAUDE_SONNET,
+    max_tokens: 128000,
+    temperature: 1,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: promptContent + kiwico,
+          },
+        ],
+      },
+    ],
+  });
+
+  // Handle different response formats for Claude API
+  if (typeof message.content[0] === "object" && "text" in message.content[0]) {
+    return message.content[0].text;
+  } else {
+    // Convert other content types to string if needed
+    return message.content
+      .map((item) => {
+        if (typeof item === "object" && "text" in item) {
+          return item.text;
+        }
+        return "";
+      })
+      .join("\n");
+  }
+}
+
+async function processPrompt(
+  promptPath: string,
+  config: {
+    geminiApiKey?: string;
+    claudeApiKey?: string;
+    model: string;
+    filename: string;
+  }
+): Promise<{ text: string; filename: string }> {
+  const { model, filename } = config;
+
+  // Read the prompt file
+  const promptContent = await readFile(promptPath, "utf-8");
+
+  console.log(
+    chalk.yellow(`Starting processing for: ${filename} with model: ${model}`)
+  );
+
+  // Create a progress bar for this specific file
+  const progressBar = multibar.create(100, 0, { filename });
+
+  try {
+    let fullResponse: string;
+
+    // Process with appropriate model
+    if (model === MODELS.CLAUDE_SONNET) {
+      if (!config.claudeApiKey) {
+        throw new Error("ANTHROPIC_API_KEY is required for Claude models");
+      }
+
+      // For Claude, we don't have streaming progress, so show indeterminate
+      progressBar.update(10);
+      fullResponse = await processPromptWithClaude(
+        promptContent,
+        config.claudeApiKey
+      );
+      progressBar.update(100);
+    } else {
+      // For Gemini models
+      if (!config.geminiApiKey) {
+        throw new Error("GEMINI_API_KEY is required for Gemini models");
+      }
+
+      // Process with Gemini
+      progressBar.update(5);
+      fullResponse = await processPromptWithGemini(
+        promptContent,
+        config.geminiApiKey,
+        model
+      );
+      progressBar.update(100);
+    }
+
+    return { text: fullResponse, filename };
+  } catch (error) {
+    progressBar.stop();
+    throw error;
+  }
 }
 
 async function main() {
-  const apiKey = process.env.GEMINI_API_KEY;
+  // Check for required API keys based on model
+  const geminiApiKey = process.env.GEMINI_API_KEY;
+  const claudeApiKey = process.env.ANTHROPIC_API_KEY;
 
-  if (!apiKey) {
+  if (selectedModel.includes("gemini") && !geminiApiKey) {
     console.error(
       chalk.red("❌ Error: GEMINI_API_KEY environment variable is not set")
     );
     process.exit(1);
   }
 
-  // Parse command line arguments
-  const { partNumbers, outputDir } = parseArgs();
+  if (selectedModel.includes("claude") && !claudeApiKey) {
+    console.error(
+      chalk.red("❌ Error: ANTHROPIC_API_KEY environment variable is not set")
+    );
+    process.exit(1);
+  }
 
-  console.log(chalk.cyan(`Using output directory: ${outputDir}`));
+  // Print configuration information
+  console.log(chalk.cyan("Configuration:"));
+  console.log(`- Input directory: ${PROMPTS_DIR}`);
+  console.log(`- Output directory: ${RESPONSES_DIR}`);
+  console.log(`- Model: ${selectedModel}`);
+  console.log(`- Max concurrent requests: ${MAX_PARALLEL}`);
+
+  if (partNumbers.length > 0) {
+    console.log(`- Processing parts: ${partNumbers.join(", ")}`);
+  } else {
+    console.log(`- Processing all parts`);
+  }
 
   try {
     // Create responses directory if it doesn't exist
-    if (!existsSync(outputDir)) {
-      await fsMkdir(outputDir, { recursive: true });
-      console.log(`Created directory: ${outputDir}`);
+    if (!existsSync(RESPONSES_DIR)) {
+      await fsMkdir(RESPONSES_DIR, { recursive: true });
+      console.log(`Created directory: ${RESPONSES_DIR}`);
     }
 
     // Get all prompt files
@@ -186,17 +351,23 @@ async function main() {
 
           const partNumber = parseInt(partMatch[1], 10);
 
-          // Process the prompt with Gemini
-          const result = await processPrompt(promptPath, apiKey, file);
+          // Process the prompt with the selected model
+          const result = await processPrompt(promptPath, {
+            geminiApiKey,
+            claudeApiKey,
+            model: selectedModel,
+            filename: file,
+          });
 
           // Save the response
           const responseFileName = `response_part${partNumber}.txt`;
-          const responsePath = join(outputDir, responseFileName);
+          const responsePath = join(RESPONSES_DIR, responseFileName);
           await writeFile(responsePath, result.text);
 
           // Log success details
           console.log(chalk.green(`✅ Generated response: ${responsePath}`));
           console.log(`   - Response length: ${result.text.length} characters`);
+          console.log(`   - Model used: ${selectedModel}`);
 
           processedFiles.push(responseFileName);
           return { success: true, file };
@@ -220,6 +391,7 @@ async function main() {
     // Print summary
     console.log("\n" + chalk.cyan("📋 Summary:"));
     console.log(`Total files: ${promptFiles.length}`);
+    console.log(`Model used: ${selectedModel}`);
     console.log(
       chalk.green(`Successfully processed: ${processedFiles.length}`)
     );
@@ -239,7 +411,7 @@ async function main() {
       });
       console.log(
         chalk.green(
-          `\n✨ Successfully processed ${processedFiles.length} prompt files to ${outputDir}`
+          `\n✨ Successfully processed ${processedFiles.length} prompt files to ${RESPONSES_DIR}`
         )
       );
     } else {
