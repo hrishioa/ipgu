@@ -96,7 +96,7 @@ async function transcribeAudio(
           },
         },
         {
-          text: `Here's part of a movie I want to subtitle. Can you give me the transcript in malayalam to the best of your ability with timestamps? Don't worry about getting the timestamps correct - but transcribe all that you can. Don't think too much - just start - it's about 20 minutes.
+          text: `Here's part of a movie I want to subtitle. Can you give me the transcript in malayalam (and tamil) to the best of your ability with timestamps? Don't worry about getting the timestamps correct - but transcribe all that you can. Don't think too much - just start - it's about 20 minutes.
 
 Use this format:
 relative (mm:ss - mm:ss) - (line)`,

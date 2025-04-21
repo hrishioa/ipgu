@@ -1,0 +1,13 @@
+{
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@types/cli-progress": "^3.11.6",
+    "anthropic": "^0.0.0",
+    "chalk": "^5.4.1",
+    "cli-progress": "^3.12.0"
+  },
+  "devDependencies": {
+    "@google/genai": "^0.9.0",
+    "@types/node": "^22.14.1"
+  }
+}
