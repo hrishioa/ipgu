@@ -91,24 +91,30 @@ function logToConsole(
 ): void {
   if (!currentConfig.logToConsole) return;
 
+  let messageForConsole = coloredMessage;
+
+  // Append note about log file for errors when bar is active and file logging is on
+  if (currentConfig.multibar && currentConfig.logToFile && level === "error") {
+    messageForConsole += chalk.gray(" (See log file for full details)");
+  }
+
   if (currentConfig.multibar) {
     // Use MultiBar's log method
-    // It expects stream, message, EOL character
-    currentConfig.multibar.log(`${coloredMessage}\n`);
+    currentConfig.multibar.log(`${messageForConsole}\n`);
   } else {
     // Standard console logging
     switch (level) {
       case "debug":
-        console.debug(coloredMessage);
+        console.debug(messageForConsole);
         break;
       case "info":
-        console.info(coloredMessage);
+        console.info(messageForConsole);
         break;
       case "warn":
-        console.warn(coloredMessage);
+        console.warn(messageForConsole);
         break;
       case "error":
-        console.error(coloredMessage);
+        console.error(messageForConsole);
         break;
     }
   }

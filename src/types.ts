@@ -6,14 +6,16 @@ export interface Config {
   srtPath?: string; // Optional reference SRT
   outputDir: string;
   intermediateDir: string;
-  targetLanguages: string[]; // e.g., ['ko', 'ja']
+  sourceLanguages?: string[]; // Optional: Languages spoken in the source video (e.g., ['ml', 'ta'])
+  targetLanguages: string[]; // e.g., ['korean', 'japanese'
   transcriptionModel: string;
   translationModel: string;
   chunkDuration: number; // seconds
   chunkOverlap: number; // seconds
   chunkFormat: "mp3" | "mp4";
   maxConcurrent: number;
-  retries: number;
+  retries: number; // General retries (e.g., for translation API calls)
+  transcriptionRetries: number; // Specific retries for transcription validation failure
   force: boolean;
   apiKeys: {
     gemini?: string;
@@ -30,11 +32,12 @@ export interface ChunkInfo {
   mediaChunkPath?: string; // Path to mp3 or mp4 chunk
   srtChunkPath?: string; // Path to reference SRT chunk
   rawTranscriptPath?: string;
-  adjustedTranscriptPath?: string;
+  adjustedTranscriptPath?: string; // Path to transcript with absolute timestamps
   promptPath?: string;
   responsePath?: string; // Path to primary LLM response
   backupResponsePath?: string; // Path if retries generated alternatives
   parsedDataPath?: string; // Path to parsed JSON from response
+  failedTranscriptPath?: string; // Path to raw transcript if it failed validation
   status:
     | "pending"
     | "splitting"

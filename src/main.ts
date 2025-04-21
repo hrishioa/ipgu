@@ -39,6 +39,10 @@ async function main() {
       "./intermediate"
     )
     .option(
+      "--source-languages <langs>",
+      "Comma-separated source languages in video (e.g., ml,ta)"
+    )
+    .option(
       "-l, --languages <langs>",
       "Target languages (comma-separated, e.g., ko,ja)",
       "ko"
@@ -61,7 +65,16 @@ async function main() {
     .option("-o, --chunk-overlap <seconds>", "Chunk overlap in seconds", "300")
     .option("-f, --chunk-format <format>", "Chunk format (mp3 or mp4)", "mp3")
     .option("-c, --max-concurrent <number>", "Max concurrent processes", "3")
-    .option("-r, --retries <number>", "Number of retries for API calls", "2")
+    .option(
+      "-r, --retries <number>",
+      "Number of retries for general API calls (not transcription validation)",
+      "2"
+    )
+    .option(
+      "--transcription-retries <number>",
+      "Number of retries for transcription validation failure",
+      "1"
+    )
     .option(
       "--force",
       "Force reprocessing even if intermediate files exist",
@@ -99,6 +112,9 @@ async function main() {
       srtPath: opts.srt,
       outputDir: opts.output,
       intermediateDir: opts.intermediate,
+      sourceLanguages: opts.sourceLanguages
+        ? opts.sourceLanguages.split(",").map((lang: string) => lang.trim())
+        : undefined,
       targetLanguages: opts.languages
         .split(",")
         .map((lang: string) => lang.trim()),
@@ -109,6 +125,7 @@ async function main() {
       chunkFormat: opts.chunkFormat === "mp4" ? "mp4" : "mp3",
       maxConcurrent: parseInt(opts.maxConcurrent),
       retries: parseInt(opts.retries),
+      transcriptionRetries: parseInt(opts.transcriptionRetries),
       force: opts.force,
       apiKeys: {
         gemini: opts.geminiApiKey || process.env.GEMINI_API_KEY,
