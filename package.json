@@ -1,13 +1,32 @@
 {
+  "name": "subtitle-translation-pipeline",
+  "version": "1.0.0",
+  "description": "End-to-end pipeline for generating bilingual subtitles from videos",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/main.ts",
+    "start": "bun src/main.ts",
+    "splitter": "bun src/splitter/index.ts",
+    "transcriber": "bun src/transcriber/index.ts",
+    "translator": "bun src/translator/index.ts",
+    "parser": "bun src/parser/index.ts",
+    "validator": "bun src/validator/index.ts",
+    "merge": "bun src/merger/index.ts",
+    "formatter": "bun src/formatter/index.ts",
+    "build": "bun build src/main.ts --target node --outdir dist",
+    "test": "bun test"
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "@google/genai": "^0.16.0",
     "@types/cli-progress": "^3.11.6",
-    "anthropic": "^0.0.0",
-    "chalk": "^5.4.1",
-    "cli-progress": "^3.12.0"
+    "boxen": "^8.0.1",
+    "chalk": "^5.3.0",
+    "cli-progress": "^3.12.0",
+    "commander": "^11.1.0"
   },
   "devDependencies": {
-    "@google/genai": "^0.9.0",
-    "@types/node": "^22.14.1"
+    "@types/node": "^20.10.5",
+    "bun-types": "latest"
   }
 }
