@@ -28,6 +28,8 @@ export interface Config {
   markFallbacks?: boolean; // Add marker to subtitles using original text
   subtitleColorEnglish?: string; // Color for English text
   subtitleColorTarget?: string; // Color for the target language text
+  outputOffsetSeconds?: number; // Optional: Add seconds offset to final output timings
+  inputOffsetSeconds?: number; // Optional: Add seconds offset to the input original SRT timings
 }
 
 // Information about each processed chunk

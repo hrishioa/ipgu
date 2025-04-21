@@ -78,7 +78,10 @@ async function loadParsedData(
 async function mergeTranslations(
   allParsedEntries: ParsedTranslationEntry[],
   originalSrtPath: string | undefined,
-  config: Pick<Config, "useResponseTimings" | "targetLanguages">
+  config: Pick<
+    Config,
+    "useResponseTimings" | "targetLanguages" | "inputOffsetSeconds"
+  >
 ): Promise<{
   mergedEntries: Omit<FinalSubtitleEntry, "finalId">[];
   issues: ProcessingIssue[];
@@ -97,15 +100,20 @@ async function mergeTranslations(
     `Resolved chunk overlaps. Kept ${translationsById.size} unique entries.`
   );
 
-  // Load original SRT for fallback timings/text
+  // Load original SRT, passing the input offset
   let originalSrtMap: Map<string, SrtEntry> | null = null;
+  const inputOffset = config.inputOffsetSeconds ?? 0;
   if (originalSrtPath && existsSync(originalSrtPath)) {
-    const srtEntries = await parseSrtFile(originalSrtPath);
+    // Pass offset to parser
+    const srtEntries = await parseSrtFile(originalSrtPath, inputOffset);
     if (srtEntries) {
       originalSrtMap = new Map(srtEntries.map((e) => [e.id.toString(), e]));
       logger.debug(
-        `Loaded ${originalSrtMap.size} original SRT entries for reference.`
+        `Loaded ${originalSrtMap.size} original SRT entries (offset: ${inputOffset}s).`
       );
+    } else {
+      logger.warn(`Failed to parse original SRT: ${originalSrtPath}`);
+      // Don't push issue here, handled below if needed
     }
   }
   if (!originalSrtMap) {
@@ -381,11 +389,32 @@ export async function finalize(
   logger.info("Generating final SRT string...");
   let srtContent = "";
   const targetLanguage = config.targetLanguages[0]; // Assume single target
+  const outputOffset = config.outputOffsetSeconds ?? 0; // Get offset or default to 0
+
+  if (outputOffset !== 0) {
+    logger.info(`Applying output offset of ${outputOffset} seconds.`);
+  }
+
   finalSubtitleData.forEach((entry, index) => {
+    // Apply offset before formatting
+    const finalStartTime = entry.startTimeSeconds + outputOffset;
+    const finalEndTime = entry.endTimeSeconds + outputOffset;
+
+    // Prevent negative timestamps after offset
+    if (finalStartTime < 0 || finalEndTime < 0) {
+      logger.warn(
+        `[ID ${entry.originalId}] Skipping entry due to negative timestamp after applying offset ${outputOffset}s.`
+      );
+      return; // Skip this entry
+    }
+
     const finalEntry: FinalSubtitleEntry = {
       ...entry,
       finalId: index + 1, // Renumber sequentially
       markFallback: config.markFallbacks,
+      // Use the offset-adjusted times
+      startTimeSeconds: finalStartTime,
+      endTimeSeconds: finalEndTime,
     };
     srtContent += formatSrtEntry(finalEntry, targetLanguage, config);
   });
@@ -423,10 +452,9 @@ interface FinalizerCliOptions {
   targetLanguage: string; // Single target language
   useResponseTimings?: boolean;
   markFallbacks?: boolean;
-  colorEnglish?: string;
-  colorTarget?: string;
-  logFile?: string;
   logLevel?: string;
+  outputOffset?: number;
+  inputOffset?: number;
 }
 
 async function cliMain() {
@@ -467,9 +495,16 @@ async function cliMain() {
       "Add [Original] marker to fallback subtitles",
       true
     )
-    .option("--colors <eng,tgt>", "Set custom hex colors (e.g., FFFFFF,00FFFF)")
     .option("--log-file <path>", "Path to log file")
     .option("--log-level <level>", "Log level", "info")
+    .option(
+      "--output-offset <seconds>",
+      "Add offset (in seconds, can be negative) to final subtitle timings"
+    )
+    .option(
+      "--input-offset <seconds>",
+      "Apply offset (in seconds, can be negative) to input SRT timings"
+    )
     .parse(process.argv);
 
   const opts = program.opts();
@@ -486,18 +521,32 @@ async function cliMain() {
     [engColor, tgtColor] = opts.colors.split(",").map((c: string) => c.trim());
   }
 
-  // Build minimal config for finalize function
-  const config: Partial<Config> = {
+  const cliOptions: FinalizerCliOptions = {
     intermediateDir: opts.intermediateDir,
-    srtPath: opts.originalSrt,
+    originalSrt: opts.originalSrt,
     outputDir: opts.outputDir,
-    targetLanguages: [opts.language.trim()], // Single language
+    outputFilename: opts.outputFilename,
+    targetLanguage: opts.language.trim(),
     useResponseTimings: opts.useResponseTimings || false,
     markFallbacks: opts.markFallbacks !== undefined ? opts.markFallbacks : true,
+    logLevel: opts.logLevel,
+    outputOffset: opts.outputOffset ? parseFloat(opts.outputOffset) : undefined,
+    inputOffset: opts.inputOffset ? parseFloat(opts.inputOffset) : undefined,
+  };
+
+  // Build minimal config for finalize function
+  const config: Partial<Config> = {
+    intermediateDir: cliOptions.intermediateDir,
+    srtPath: cliOptions.originalSrt,
+    outputDir: cliOptions.outputDir,
+    targetLanguages: [cliOptions.targetLanguage],
+    useResponseTimings: cliOptions.useResponseTimings,
+    markFallbacks: cliOptions.markFallbacks,
     subtitleColorEnglish: engColor,
     subtitleColorTarget: tgtColor,
-    // Fields not directly needed but part of Config
-    videoPath: opts.outputFilename, // Use output filename as proxy for video path default name generation
+    outputOffsetSeconds: cliOptions.outputOffset ?? 0,
+    inputOffsetSeconds: cliOptions.inputOffset ?? 0,
+    videoPath: cliOptions.outputFilename,
   };
 
   try {

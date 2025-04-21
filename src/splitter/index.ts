@@ -27,6 +27,7 @@ interface SplitterOptions {
   maxConcurrent: number;
   force: boolean;
   processOnlyPart?: number;
+  inputOffsetSeconds?: number;
 }
 
 /**
@@ -45,6 +46,7 @@ export async function split(
     maxConcurrent,
     force,
     processOnlyPart,
+    inputOffsetSeconds,
   } = options;
 
   // Validate inputs
@@ -138,7 +140,13 @@ export async function split(
   // If we have an SRT file, split it too
   if (srtPath && existsSync(srtPath)) {
     info(`Splitting SRT: ${srtPath}`);
-    const srtResult = await splitSrt(srtPath, chunks, srtDir, force);
+    const srtResult = await splitSrt(
+      srtPath,
+      chunks,
+      srtDir,
+      force,
+      inputOffsetSeconds ?? 0
+    );
     issues.push(...srtResult.issues);
   }
 
@@ -188,6 +196,10 @@ async function main() {
       "info"
     )
     .option("-P, --part <number>", "Process only a specific part number")
+    .option(
+      "--input-offset <seconds>",
+      "Apply offset (in seconds, can be negative) to input SRT timings"
+    )
     .parse();
 
   const opts = program.opts();
@@ -210,6 +222,9 @@ async function main() {
       maxConcurrent: parseInt(opts.concurrent),
       force: opts.force,
       processOnlyPart: opts.part ? parseInt(opts.part) : undefined,
+      inputOffsetSeconds: opts.inputOffset
+        ? parseFloat(opts.inputOffset)
+        : undefined,
     };
 
     const { chunks, issues } = await split(options);

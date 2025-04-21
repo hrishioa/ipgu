@@ -1,18 +1,27 @@
 import { readFile } from "fs/promises";
-import type { SrtEntry } from "../types"; // Assuming SrtEntry is in types.ts
-import { parseSrtTiming } from "./time_utils"; // Assuming time utils are here
-import * as logger from "./logger";
+import type { SrtEntry } from "../types.js"; // Assuming SrtEntry is in types.ts
+import {
+  parseSrtTiming,
+  formatSrtTiming,
+  secondsToTimestamp,
+} from "./time_utils.js"; // Assuming time utils are here
+import * as logger from "./logger.js";
 
 /**
- * Parse an SRT file into SrtEntry objects
- * @param filePath Path to the SRT file
- * @returns Promise resolving to an array of SrtEntry objects, or null if error
+ * Parse an SRT file into SrtEntry objects, applying an optional time offset.
+ * @param filePath Path to the SRT file.
+ * @param offsetSeconds Optional offset in seconds to apply to all timestamps.
+ * @returns Promise resolving to an array of SrtEntry objects, or null if error.
  */
 export async function parseSrtFile(
-  filePath: string
+  filePath: string,
+  offsetSeconds: number = 0 // Default offset to 0
 ): Promise<SrtEntry[] | null> {
   try {
-    logger.debug(`Parsing SRT file: ${filePath}`);
+    logger.debug(
+      `Parsing SRT file: ${filePath}` +
+        (offsetSeconds ? ` with offset: ${offsetSeconds}s` : "")
+    );
     const content = await readFile(filePath, "utf-8");
 
     // Remove BOM if present
@@ -46,22 +55,40 @@ export async function parseSrtFile(
         continue;
       }
 
-      const timingString = lines[1].trim();
-      const timing = parseSrtTiming(timingString);
+      const originalTimingString = lines[1].trim();
+      const timing = parseSrtTiming(originalTimingString);
       if (!timing) {
         logger.warn(
-          `[SRT Parser] Malformed block (invalid timing): ${timingString}`
+          `[SRT Parser] Malformed block (invalid timing): ${originalTimingString}`
         );
         continue;
       }
+
+      // Apply offset
+      const offsettedStartTime = timing.startTimeSeconds + offsetSeconds;
+      const offsettedEndTime = timing.endTimeSeconds + offsetSeconds;
+
+      // Skip entry if offset results in negative times
+      if (offsettedStartTime < 0 || offsettedEndTime < 0) {
+        logger.warn(
+          `[SRT Parser] Skipping entry ID ${id} due to negative timestamp after applying offset ${offsetSeconds}s (Original: ${originalTimingString})`
+        );
+        continue;
+      }
+
+      // Regenerate timing string with offsetted values
+      const newTimingString = formatSrtTiming(
+        offsettedStartTime,
+        offsettedEndTime
+      );
 
       const text = lines.slice(2).join("\n");
 
       entries.push({
         id,
-        timingString,
-        startTimeSeconds: timing.startTimeSeconds,
-        endTimeSeconds: timing.endTimeSeconds,
+        timingString: newTimingString, // Store the *new* timing string
+        startTimeSeconds: offsettedStartTime, // Store offsetted seconds
+        endTimeSeconds: offsettedEndTime, // Store offsetted seconds
         text,
       });
     }
@@ -70,7 +97,7 @@ export async function parseSrtFile(
     entries.sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
 
     logger.debug(
-      `[SRT Parser] Parsed ${entries.length} subtitles from ${filePath}`
+      `[SRT Parser] Parsed and offsetted ${entries.length} subtitles from ${filePath}`
     );
     return entries;
   } catch (error) {

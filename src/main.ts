@@ -122,6 +122,14 @@ async function main() {
       "--colors <eng,tgt>",
       "Set subtitle colors (hex, e.g., FFFFFF,00FFFF)"
     )
+    .option(
+      "--output-offset <seconds>",
+      "Add offset (in seconds, can be negative) to final subtitle timings"
+    )
+    .option(
+      "--input-offset <seconds>",
+      "Apply offset (in seconds, can be negative) to input SRT timings"
+    )
     .parse();
 
   const opts = program.opts();
@@ -167,6 +175,10 @@ async function main() {
         gemini: opts.geminiApiKey || process.env.GEMINI_API_KEY,
         anthropic: opts.anthropicApiKey || process.env.ANTHROPIC_API_KEY,
       },
+      outputOffsetSeconds: opts.outputOffset
+        ? parseFloat(opts.outputOffset)
+        : 0,
+      inputOffsetSeconds: opts.inputOffset ? parseFloat(opts.inputOffset) : 0,
       processOnlyPart: opts.part ? parseInt(opts.part) : undefined,
       disableTimingValidation: opts.noTimingCheck || false,
       useResponseTimings: opts.useResponseTimings || false,
