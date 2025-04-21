@@ -61,21 +61,47 @@ export interface SrtEntry {
   text: string;
 }
 
-// Issue found during processing
+// Parsed entry from LLM translation response (REFINED)
+export interface ParsedTranslationEntry {
+  originalId: string; // Corresponds to SrtEntry ID, from <original_number>
+  originalLine?: string; // Text from <original_line>
+  originalTiming?: string; // Raw timing string from <original_timing>
+  parsedStartTimeSeconds?: number; // Parsed start time (if timing exists and is valid)
+  parsedEndTimeSeconds?: number; // Parsed end time (if timing exists and is valid)
+  translations: Record<string, string | null>; // { 'english': '...', 'korean': '...' } - Allow null if tag exists but is empty
+  sourceChunk: number; // Which part number this came from
+  sourceFormat: "markdown" | "direct_tag" | "regex" | "unknown"; // How the subline block was found
+}
+
+// Define possible issue types
+export type ParsingIssueType =
+  | "MissingTag"
+  | "InvalidTimingFormat"
+  | "InvalidTimingValue"
+  | "MalformedTag"
+  | "AmbiguousStructure"
+  | "ExtractionFailed"
+  | "DuplicateId"
+  | "NumberNotFound"
+  | "TextNotFound"
+  | "MarkdownBlockEmptyOrInvalid";
+
+// Issue found during processing (ensure ParseError is listed and lineNumber exists)
 export interface ProcessingIssue {
   type:
+    | ParsingIssueType
     | "SplitError"
     | "TranscriptionError"
-    | "TimestampAdjustError" // Keep for potential future use
-    | "PromptGenError" // Keep for errors during prompt string generation
+    | "TimestampAdjustError"
+    | "PromptGenError"
     | "TranslationError"
-    | "ParseError"
     | "ValidationError"
     | "MergeError"
     | "FormatError";
   severity: "error" | "warning" | "info";
   message: string;
   chunkPart?: number;
-  subtitleId?: string | number;
+  subtitleId?: string | number; // ID from <original_number> if available
   context?: string; // Snippet or relevant data
+  lineNumber?: number; // Optional line number from parser
 }

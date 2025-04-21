@@ -18,6 +18,7 @@ import { ensureDir } from "./utils/file_utils.js";
 import { split } from "./splitter/index.js";
 import { transcribe } from "./transcriber/index.js";
 import { translate } from "./translator/index.js"; // Import the new translator function
+import { parseResponse } from "./parser/index.js"; // Import parser function
 
 /**
  * Subtitle Pipeline main entry point
@@ -226,7 +227,7 @@ async function main() {
 
     // --- Step 3: Translate ---
     info(chalk.blueBright("--- Step 3: Generating Translations ---"));
-    const translateResult = await translate(currentChunks, config); // Call translate
+    const translateResult = await translate(currentChunks, config);
     currentChunks = translateResult.chunks;
     allIssues.push(...translateResult.issues);
     if (currentChunks.filter((c) => c.status === "parsing").length === 0) {
@@ -237,18 +238,44 @@ async function main() {
       process.exit(1);
     }
 
+    // --- Step 4: Parse LLM Responses ---
+    info(chalk.blueBright("--- Step 4: Parsing LLM Responses ---"));
+    const parsingPromises = currentChunks
+      .filter((chunk) => chunk.status === "parsing") // Only parse chunks ready for parsing
+      .map(async (chunk) => {
+        const { chunk: updatedChunk, issues: parseIssues } =
+          await parseResponse(chunk, config);
+        allIssues.push(...parseIssues);
+        return updatedChunk;
+      });
+
+    const parsedChunks = await Promise.all(parsingPromises);
+
+    // Update the main chunk array with results from parsing
+    currentChunks = currentChunks.map((originalChunk) => {
+      const updated = parsedChunks.find(
+        (pc) => pc.partNumber === originalChunk.partNumber
+      );
+      return updated || originalChunk;
+    });
+
+    if (currentChunks.filter((c) => c.status === "validating").length === 0) {
+      error("Parsing failed for all processable chunks. Aborting pipeline.");
+      // TODO: Add final report generation here
+      process.exit(1);
+    }
+
     // --- Subsequent Steps ---
-    // TODO: Add steps 4-6: Parse, Validate, Merge, Format
+    // TODO: Add steps 5-6: Validate, Merge, Format
 
     success(
       chalk.greenBright(
-        "Pipeline finished preliminary steps (Split, Transcribe, Translate)."
+        "Pipeline finished preliminary steps (Split, Transcribe, Translate, Parse)."
       )
     );
-    // TODO: Final report generation using allIssues and final chunk status
     console.log(
       boxen(
-        `Pipeline Complete (Up to Translation Step)\nSee intermediate directory: ${config.intermediateDir}\nTotal Issues: ${allIssues.length}`,
+        `Pipeline Complete (Up to Parsing Step)\nSee intermediate directory: ${config.intermediateDir}\nTotal Issues: ${allIssues.length}`,
         { padding: 1, margin: 1, borderColor: "green" }
       )
     );

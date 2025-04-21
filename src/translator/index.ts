@@ -220,58 +220,75 @@ export async function translate(
   });
   logger.setActiveMultibar(multibar);
 
-  // --- Concurrency Control ---
-  const activePromises: Promise<void>[] = [];
-  const queue = [...chunksToProcess];
+  // --- Refactored Concurrency Control ---
+  const queue = [...chunksToProcess]; // Copy chunks to process into a queue
   const maxConcurrent =
     config.maxConcurrent > 0 ? config.maxConcurrent : queue.length;
+  const activePromises: Promise<void>[] = [];
   let processedCount = 0;
 
-  const runNext = async () => {
-    if (queue.length === 0) return;
+  // Function to start the next task from the queue
+  const startNextTask = () => {
+    if (queue.length === 0) return; // Nothing left to start
     const chunk = queue.shift();
     if (!chunk) return;
 
-    progressBar.update(processedCount, {
-      task: `Translating chunk ${chunk.partNumber}...`,
-    });
-    try {
-      await processTranslationChunk(chunk, config, issues);
-    } catch (error: any) {
-      // Catch unexpected errors from processTranslationChunk
-      chunk.status = "failed";
-      chunk.error = `Unexpected error during chunk translation processing: ${
-        error.message || error
-      }`;
-      logger.error(`[Chunk ${chunk.partNumber}] ${chunk.error}`);
-      issues.push({
-        type: "TranslationError",
-        severity: "error",
-        message: chunk.error,
-        chunkPart: chunk.partNumber,
-        context: error.stack,
+    const taskPromise = processTranslationChunk(chunk, config, issues)
+      .catch((error: any) => {
+        // Catch unexpected errors from processTranslationChunk itself
+        chunk.status = "failed";
+        chunk.error = `Unexpected error during chunk ${
+          chunk.partNumber
+        } translation processing: ${error.message || error}`;
+        logger.error(`[Chunk ${chunk.partNumber}] ${chunk.error}`);
+        issues.push({
+          type: "TranslationError",
+          severity: "error",
+          message: chunk.error,
+          chunkPart: chunk.partNumber,
+          context: error.stack,
+        });
+      })
+      .finally(() => {
+        processedCount++;
+        progressBar.update(processedCount, {
+          task:
+            chunk.status === "failed"
+              ? `Chunk ${chunk.partNumber} failed!`
+              : `Chunk ${chunk.partNumber} done.`,
+        });
+        // Remove this promise from the active list once done
+        const index = activePromises.indexOf(taskPromise);
+        if (index > -1) {
+          activePromises.splice(index, 1);
+        }
+        // Immediately try to start another task if there's capacity
+        if (activePromises.length < maxConcurrent) {
+          startNextTask();
+        }
       });
-    } finally {
-      processedCount++;
-      progressBar.increment(1, {
-        task:
-          chunk.status === "failed"
-            ? `Chunk ${chunk.partNumber} failed!`
-            : `Chunk ${chunk.partNumber} done.`,
-      });
-    }
+    activePromises.push(taskPromise);
   };
 
-  // --- Start Processing ---
-  const initialTasks = Array.from(
-    { length: Math.min(maxConcurrent, queue.length) },
-    runNext
-  );
-  await Promise.all(initialTasks);
-
-  while (processedCount < chunksToProcess.length) {
-    await runNext(); // Process remaining tasks as slots open
+  // Start initial batch of workers
+  for (let i = 0; i < Math.min(maxConcurrent, queue.length); i++) {
+    startNextTask();
   }
+
+  // Wait for all promises to settle (this replaces the old loop)
+  // We need a mechanism to wait until queue is empty AND activePromises is empty
+  while (activePromises.length > 0 || queue.length > 0) {
+    // If there's capacity and items in queue, start more tasks
+    while (activePromises.length < maxConcurrent && queue.length > 0) {
+      startNextTask();
+    }
+    // If no capacity or queue empty, wait for *any* active task to finish
+    if (activePromises.length > 0) {
+      await Promise.race(activePromises);
+    }
+    // Loop continues, checking capacity and queue again
+  }
+  // At this point, queue is empty and all active promises have resolved/rejected
 
   // --- Cleanup ---
   progressBar.stop();
