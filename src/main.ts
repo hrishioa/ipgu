@@ -4,7 +4,8 @@ import { Command } from "commander";
 import { join } from "path";
 import { existsSync } from "fs";
 import chalk from "chalk";
-import type { Config, ChunkInfo, ProcessingIssue } from "./types";
+import boxen from "boxen"; // Import boxen
+import type { Config, ChunkInfo, ProcessingIssue } from "./types.js";
 import {
   configureLogger,
   info,
@@ -12,9 +13,11 @@ import {
   error,
   success,
   debug,
-} from "./utils/logger";
-import { ensureDir } from "./utils/file_utils";
-import { split } from "./splitter";
+} from "./utils/logger.js";
+import { ensureDir } from "./utils/file_utils.js";
+import { split } from "./splitter/index.js";
+import { transcribe } from "./transcriber/index.js";
+import { translate } from "./translator/index.js"; // Import the new translator function
 
 /**
  * Subtitle Pipeline main entry point
@@ -43,9 +46,9 @@ async function main() {
       "Comma-separated source languages in video (e.g., ml,ta)"
     )
     .option(
-      "-l, --languages <langs>",
-      "Target languages (comma-separated, e.g., ko,ja)",
-      "ko"
+      "-l, --target-language <lang>",
+      "The target language (besides English)",
+      "Korean"
     )
     .option(
       "-tm, --transcription-model <model>",
@@ -55,7 +58,11 @@ async function main() {
     .option(
       "-tl, --translation-model <model>",
       "Model for translation",
-      "claude-3-sonnet-20240229"
+      "claude-3-5-sonnet-20240620" // Default translation model
+    )
+    .option(
+      "--translation-prompt-template <path>", // Option for template
+      "Path to custom translation prompt template file (uses default if not set)"
     )
     .option(
       "-d, --chunk-duration <seconds>",
@@ -64,7 +71,7 @@ async function main() {
     )
     .option("-o, --chunk-overlap <seconds>", "Chunk overlap in seconds", "300")
     .option("-f, --chunk-format <format>", "Chunk format (mp3 or mp4)", "mp3")
-    .option("-c, --max-concurrent <number>", "Max concurrent processes", "3")
+    .option("-c, --max-concurrent <number>", "Max concurrent processes", "5") // Default 5
     .option(
       "-r, --retries <number>",
       "Number of retries for general API calls (not transcription validation)",
@@ -115,9 +122,8 @@ async function main() {
       sourceLanguages: opts.sourceLanguages
         ? opts.sourceLanguages.split(",").map((lang: string) => lang.trim())
         : undefined,
-      targetLanguages: opts.languages
-        .split(",")
-        .map((lang: string) => lang.trim()),
+      targetLanguages: [opts.targetLanguage.trim()],
+      translationPromptTemplatePath: opts.translationPromptTemplate,
       transcriptionModel: opts.transcriptionModel,
       translationModel: opts.translationModel,
       chunkDuration: parseInt(opts.chunkDuration),
@@ -138,24 +144,31 @@ async function main() {
       error(`Video file does not exist: ${config.videoPath}`);
       process.exit(1);
     }
-
     if (config.srtPath && !existsSync(config.srtPath)) {
-      warn(`SRT file does not exist: ${config.srtPath}`);
+      warn(`Reference SRT file does not exist: ${config.srtPath}`);
     }
-
     if (!config.apiKeys.gemini) {
       error(
         "Gemini API key is required for transcription. Provide via --gemini-api-key or GEMINI_API_KEY env var."
       );
       process.exit(1);
     }
-
+    // Validate translation keys
     if (
-      !config.apiKeys.anthropic &&
-      config.translationModel.includes("claude")
+      config.translationModel?.toLowerCase().includes("claude") &&
+      !config.apiKeys?.anthropic
     ) {
       error(
-        "Anthropic API key is required for Claude models. Provide via --anthropic-api-key or ANTHROPIC_API_KEY env var."
+        "Anthropic API key is required for configured Claude translation model."
+      );
+      process.exit(1);
+    }
+    if (
+      !config.translationModel?.toLowerCase().includes("claude") &&
+      !config.apiKeys?.gemini
+    ) {
+      error(
+        "Gemini API key is required for configured non-Claude translation model."
       );
       process.exit(1);
     }
@@ -173,62 +186,88 @@ async function main() {
         2
       )}`
     );
+    let currentChunks: ChunkInfo[] = [];
+    const allIssues: ProcessingIssue[] = [];
 
-    // Step 1: Split video and SRT
-    info("Step 1: Splitting video and subtitles");
-    const mediaDir = join(config.intermediateDir, "media");
-    const srtDir = join(config.intermediateDir, "srt");
-
-    const { chunks, issues: splitIssues } = await split({
+    // --- Step 1: Split ---
+    info(chalk.blueBright("--- Step 1: Splitting Inputs ---"));
+    const splitResult = await split({
       videoPath: config.videoPath,
       srtPath: config.srtPath,
-      outputDir: config.intermediateDir,
+      outputDir: config.intermediateDir, // Splitter outputs to intermediate
       chunkDuration: config.chunkDuration,
       chunkOverlap: config.chunkOverlap,
       chunkFormat: config.chunkFormat,
-      maxConcurrent: config.maxConcurrent,
+      maxConcurrent: config.maxConcurrent, // Use main concurrency for ffmpeg
       force: config.force,
     });
-
-    // TODO: Add the rest of the pipeline steps here:
-    // 2. Transcribe audio/video chunks
-    // 3. Adjust timestamps
-    // 4. Generate translation prompts
-    // 5. Translate using LLM
-    // 6. Parse and validate responses
-    // 7. Merge results
-    // 8. Format and output final subtitles
-
-    // For now, just print the split results
-    if (splitIssues.length > 0) {
-      warn(`Encountered ${splitIssues.length} issues during splitting:`);
-      splitIssues.forEach((issue) => {
-        const prefix =
-          issue.severity === "error"
-            ? chalk.red("ERROR")
-            : issue.severity === "warning"
-            ? chalk.yellow("WARN")
-            : chalk.blue("INFO");
-        console.log(`${prefix}: ${issue.message}`);
-      });
+    currentChunks = splitResult.chunks;
+    allIssues.push(...splitResult.issues);
+    if (currentChunks.filter((c) => c.status !== "failed").length === 0) {
+      error("Splitting failed for all chunks. Aborting pipeline.");
+      // TODO: Add final report generation here
+      process.exit(1);
     }
 
-    success(
-      `Split complete: Created ${
-        chunks.filter((c) => c.status !== "failed").length
-      } chunks`
-    );
+    // --- Step 2: Transcribe & Adjust ---
     info(
-      "Next steps of the pipeline will be implemented in subsequent modules"
+      chalk.blueBright("--- Step 2: Transcription & Timestamp Adjustment ---")
     );
-  } catch (err) {
-    error(`Fatal error: ${err}`);
+    const transcribeResult = await transcribe(currentChunks, config);
+    currentChunks = transcribeResult.chunks;
+    allIssues.push(...transcribeResult.issues);
+    if (currentChunks.filter((c) => c.status === "prompting").length === 0) {
+      error(
+        "Transcription/Adjustment failed for all processable chunks. Aborting pipeline."
+      );
+      // TODO: Add final report generation here
+      process.exit(1);
+    }
+
+    // --- Step 3: Translate ---
+    info(chalk.blueBright("--- Step 3: Generating Translations ---"));
+    const translateResult = await translate(currentChunks, config); // Call translate
+    currentChunks = translateResult.chunks;
+    allIssues.push(...translateResult.issues);
+    if (currentChunks.filter((c) => c.status === "parsing").length === 0) {
+      error(
+        "Translation failed for all processable chunks. Aborting pipeline."
+      );
+      // TODO: Add final report generation here
+      process.exit(1);
+    }
+
+    // --- Subsequent Steps ---
+    // TODO: Add steps 4-6: Parse, Validate, Merge, Format
+
+    success(
+      chalk.greenBright(
+        "Pipeline finished preliminary steps (Split, Transcribe, Translate)."
+      )
+    );
+    // TODO: Final report generation using allIssues and final chunk status
+    console.log(
+      boxen(
+        `Pipeline Complete (Up to Translation Step)\nSee intermediate directory: ${config.intermediateDir}\nTotal Issues: ${allIssues.length}`,
+        { padding: 1, margin: 1, borderColor: "green" }
+      )
+    );
+  } catch (err: any) {
+    error(`Fatal pipeline error: ${err.message || err}`);
+    console.error(
+      boxen(
+        chalk.red(
+          `Fatal Pipeline Error: ${err.message || err}\n${err.stack || ""}`
+        ),
+        { padding: 1, margin: 1, borderColor: "red" }
+      )
+    );
     process.exit(1);
   }
 }
 
 // Run if this is the main module
-if (import.meta.url === Bun.main) {
+if (import.meta.url.replace("file://", "") === Bun.main) {
   main();
 }
 

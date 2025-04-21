@@ -1,10 +1,10 @@
 import { GoogleGenAI } from "@google/genai";
 import { existsSync } from "fs";
 import { basename, join } from "path";
-import type { ChunkInfo, Config, ProcessingIssue } from "../types";
-import * as logger from "../utils/logger";
-import { validateTranscriptTimestamps } from "../utils/transcript_utils";
-import { writeToFile } from "../utils/file_utils";
+import type { ChunkInfo, Config, ProcessingIssue } from "../types.js";
+import * as logger from "../utils/logger.js";
+import { validateTranscriptTimestamps } from "../utils/transcript_utils.js";
+import { writeToFile } from "../utils/file_utils.js";
 
 const MIN_TRANSCRIPT_DURATION_S = 900; // 15 minutes
 const MIN_TRANSCRIPT_LINES = 5;

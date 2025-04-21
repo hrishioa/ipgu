@@ -8,6 +8,7 @@ export interface Config {
   intermediateDir: string;
   sourceLanguages?: string[]; // Optional: Languages spoken in the source video (e.g., ['ml', 'ta'])
   targetLanguages: string[]; // e.g., ['korean', 'japanese'
+  translationPromptTemplatePath?: string; // Path to the translation prompt template file
   transcriptionModel: string;
   translationModel: string;
   chunkDuration: number; // seconds
@@ -33,19 +34,18 @@ export interface ChunkInfo {
   srtChunkPath?: string; // Path to reference SRT chunk
   rawTranscriptPath?: string;
   adjustedTranscriptPath?: string; // Path to transcript with absolute timestamps
-  promptPath?: string;
-  responsePath?: string; // Path to primary LLM response
-  backupResponsePath?: string; // Path if retries generated alternatives
+  responsePath?: string; // Path to the RAW LLM text response file
+  llmRequestLogPath?: string; // Path to structured JSON log of the request sent to LLM
+  llmResponseLogPath?: string; // Path to structured JSON log of the full LLM response object
   parsedDataPath?: string; // Path to parsed JSON from response
   failedTranscriptPath?: string; // Path to raw transcript if it failed validation
   status:
     | "pending"
     | "splitting"
     | "transcribing"
-    | "adjusting"
-    | "prompting"
-    | "translating"
-    | "parsing"
+    | "prompting" // Status indicating ready for translation prompt generation + call
+    | "translating" // In progress of calling translation LLM
+    | "parsing" // Raw response received, ready for parsing
     | "validating"
     | "completed"
     | "failed";
@@ -66,8 +66,8 @@ export interface ProcessingIssue {
   type:
     | "SplitError"
     | "TranscriptionError"
-    | "TimestampAdjustError"
-    | "PromptGenError"
+    | "TimestampAdjustError" // Keep for potential future use
+    | "PromptGenError" // Keep for errors during prompt string generation
     | "TranslationError"
     | "ParseError"
     | "ValidationError"
