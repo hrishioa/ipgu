@@ -31,69 +31,130 @@ export async function transcribe(
   ensureDir(transcriptDir); // For adjusted transcripts
   ensureDir(rawTranscriptDir); // For raw LLM output
 
-  // Filter chunks that need processing
-  const chunksToProcess = chunks.filter((c) => {
-    // Define expected output path for adjusted transcript
-    const adjustedPath = join(
-      transcriptDir,
-      `part${c.partNumber.toString().padStart(2, "0")}_adjusted.txt`
-    );
-    // Check if media exists, status allows processing, OR if the final output is missing
-    return (
-      c.mediaChunkPath &&
-      (c.status === "transcribing" || // Never successfully transcribed
-        c.status === "failed" || // Explicitly failed last time
-        (c.status !== "completed" && !existsSync(adjustedPath))) // Not completed AND final output missing
-    );
-  });
+  // --- Identify Chunks Requiring Actual Processing ---
+  const chunksNeedingProcessing: ChunkInfo[] = [];
+  const chunksToSkip: ChunkInfo[] = [];
 
-  if (chunksToProcess.length === 0) {
-    logger.info(
-      "No chunks need transcription (or reprocessing based on missing files)."
+  for (const chunk of chunks) {
+    const mediaPath = chunk.mediaChunkPath;
+    if (!mediaPath || !existsSync(mediaPath)) {
+      logger.warn(
+        `[Chunk ${chunk.partNumber}] Skipping transcription: Input media file missing (${mediaPath}).`
+      );
+      // Keep its existing status or mark as failed?
+      if (chunk.status !== "failed") chunk.status = "failed"; // Mark failed if input missing
+      chunk.error = `Input media missing: ${mediaPath}`;
+      issues.push({
+        type: "TranscriptionError",
+        severity: "error",
+        message: chunk.error,
+        chunkPart: chunk.partNumber,
+      });
+      chunksToSkip.push(chunk); // Add to skip list for clarity
+      continue; // Skip this chunk
+    }
+
+    if (config.force) {
+      logger.debug(
+        `[Chunk ${chunk.partNumber}] Force processing enabled for transcription.`
+      );
+      chunksNeedingProcessing.push(chunk);
+      continue;
+    }
+
+    const adjustedPath =
+      chunk.adjustedTranscriptPath ||
+      join(
+        transcriptDir,
+        `part${chunk.partNumber.toString().padStart(2, "0")}_adjusted.txt`
+      );
+
+    if (existsSync(adjustedPath)) {
+      if (chunk.status === "failed") {
+        logger.debug(
+          `[Chunk ${chunk.partNumber}] Output exists, but reprocessing due to failed status.`
+        );
+        chunksNeedingProcessing.push(chunk);
+      } else {
+        logger.debug(
+          `[Chunk ${chunk.partNumber}] Skipping transcription: Adjusted transcript already exists (${adjustedPath}) and status is not 'failed'.`
+        );
+        // *** IMPORTANT: Populate path and set status ***
+        chunk.adjustedTranscriptPath = adjustedPath;
+        if (chunk.status !== "completed" && chunk.status !== "prompting") {
+          chunk.status = "prompting"; // Assume successful if output exists and not failed
+        }
+        chunksToSkip.push(chunk); // Add to skip list
+      }
+    } else {
+      logger.debug(
+        `[Chunk ${chunk.partNumber}] Output adjusted transcript missing. Processing.`
+      );
+      chunksNeedingProcessing.push(chunk);
+    }
+  }
+
+  // Filter based on processOnlyPart *after* initial checks
+  let finalChunksToProcess = chunksNeedingProcessing;
+  if (config.processOnlyPart !== undefined) {
+    finalChunksToProcess = chunksNeedingProcessing.filter(
+      (c) => c.partNumber === config.processOnlyPart
     );
+    // Also filter skip list if only processing one part, though less critical
+    // chunksToSkip = chunksToSkip.filter(c => c.partNumber === config.processOnlyPart);
+  }
+
+  if (finalChunksToProcess.length === 0) {
+    logger.info(
+      "No chunks require active transcription processing (based on status, file existence, and part filter)."
+    );
+    // Return the original chunks array, as its stati were updated for skipped items
     return { chunks, issues };
   }
 
   if (!config.apiKeys.gemini) {
-    logger.error(
-      "Missing Gemini API key for transcription. Skipping transcription step."
-    );
-    issues.push({
-      type: "TranscriptionError",
-      severity: "error",
-      message: "Missing Gemini API key",
-    });
-    chunksToProcess.forEach((c) => {
+    logger.error("Missing Gemini API key..."); /* ... */
+    // Mark ONLY the chunks we were trying to process as failed
+    finalChunksToProcess.forEach((c) => {
       c.status = "failed";
       c.error = "Missing Gemini API key";
     });
-    return { chunks, issues };
+    return { chunks, issues }; // Return the full chunk list with updated stati
   }
 
   logger.info(
-    `Attempting to transcribe/reprocess ${chunksToProcess.length} chunks using ${config.transcriptionModel}...`
+    `Attempting to transcribe/reprocess ${finalChunksToProcess.length} chunks using ${config.transcriptionModel}...`
   );
 
-  // Initialize Progress Bar
+  // --- Progress Bar Setup (Based on count needing processing) ---
+  const startTime = Date.now();
+  let intervalId: Timer | null = null;
   const multibar = new cliProgress.MultiBar(
     {
       clearOnComplete: false,
       hideCursor: true,
       format: `${chalk.cyan(
         "{bar}"
-      )} | {percentage}% | {value}/{total} Chunks | ETA: {eta_formatted} | ${chalk.gray(
+      )} | {percentage}% | {value}/{total} Chunks | ETA: {eta_formatted} | Elapsed: {elapsed}s | ${chalk.gray(
         "{task}"
       )}`,
     },
     cliProgress.Presets.shades_classic
   );
-  const progressBar = multibar.create(chunksToProcess.length, 0, {
+  const progressBar = multibar.create(finalChunksToProcess.length, 0, {
     task: "Starting transcription...",
+    elapsed: "0.0",
   });
   logger.setActiveMultibar(multibar);
 
-  // --- Refactored Concurrency Control ---
-  const queue = [...chunksToProcess];
+  // Update timer to 100ms
+  intervalId = setInterval(() => {
+    const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
+    progressBar.update({ elapsed: elapsedSeconds });
+  }, 100);
+
+  // --- Concurrency Control (Operate on finalChunksToProcess) ---
+  const queue = [...finalChunksToProcess]; // Use the filtered list
   const maxConcurrent =
     config.maxConcurrent > 0 ? config.maxConcurrent : queue.length;
   const activePromises: Promise<void>[] = [];
@@ -101,12 +162,13 @@ export async function transcribe(
 
   const startNextTranscribeTask = () => {
     if (queue.length === 0) return;
-    const chunk = queue.shift();
+    const chunk = queue.shift(); // Get chunk from the filtered queue
     if (!chunk) return;
 
-    // Reset status and error for this attempt
+    // Reset status for this attempt (important for retries)
     chunk.status = "transcribing";
     chunk.error = undefined;
+    // Clear paths that will be reset on success/failure
     chunk.rawTranscriptPath = undefined;
     chunk.adjustedTranscriptPath = undefined;
     chunk.failedTranscriptPath = undefined;
@@ -116,48 +178,43 @@ export async function transcribe(
     });
 
     const taskPromise = (async () => {
-      // Wrap core logic
+      // Call transcribeChunk, which handles validation/retries internally
       const { transcript: rawTranscript, issues: chunkIssues } =
         await transcribeChunk(chunk, config);
-      issues.push(...chunkIssues);
+      issues.push(...chunkIssues); // Add issues from this specific chunk processing
 
       if (rawTranscript !== null) {
+        // *** Success Path ***
         const rawFileName = `part${chunk.partNumber
           .toString()
           .padStart(2, "0")}_raw.txt`;
         chunk.rawTranscriptPath = join(rawTranscriptDir, rawFileName);
         await writeToFile(chunk.rawTranscriptPath, rawTranscript);
-        logger.debug(
-          `[Chunk ${chunk.partNumber}] Saved raw transcript to ${chunk.rawTranscriptPath}`
-        );
-
+        // ... (Adjust timestamps) ...
         const adjustedTranscript = adjustTranscriptTimestamps(
           rawTranscript,
           chunk.startTimeSeconds
         );
+        // ... (Save adjusted) ...
         const adjustedFileName = `part${chunk.partNumber
           .toString()
           .padStart(2, "0")}_adjusted.txt`;
         chunk.adjustedTranscriptPath = join(transcriptDir, adjustedFileName);
         await writeToFile(chunk.adjustedTranscriptPath, adjustedTranscript);
-        logger.debug(
-          `[Chunk ${chunk.partNumber}] Saved adjusted transcript to ${chunk.adjustedTranscriptPath}`
-        );
-
         chunk.status = "prompting";
         logger.debug(`Successfully processed chunk ${chunk.partNumber}`);
       } else {
+        // *** Failure Path (API error or validation failure after retries) ***
         chunk.status = "failed";
         chunk.error =
-          chunk.error ||
-          "Transcription/Validation failed after retries (check logs/failed file)";
+          chunk.error || "Transcription/Validation failed after retries";
         logger.warn(
           `[Chunk ${chunk.partNumber}] Failed transcription/validation.`
         );
       }
     })()
       .catch((error: any) => {
-        // Catch unexpected errors
+        // ... (Catch unexpected errors, update chunk status/error) ...
         if (chunk) {
           chunk.status = "failed";
           chunk.error = `Unexpected error during chunk ${
@@ -203,12 +260,10 @@ export async function transcribe(
     activePromises.push(taskPromise);
   };
 
-  // Start initial batch
+  // --- Start processing loop ---
   for (let i = 0; i < Math.min(maxConcurrent, queue.length); i++) {
     startNextTranscribeTask();
   }
-
-  // Wait loop
   while (activePromises.length > 0 || queue.length > 0) {
     while (activePromises.length < maxConcurrent && queue.length > 0) {
       startNextTranscribeTask();
@@ -218,18 +273,21 @@ export async function transcribe(
     }
   }
 
-  // Cleanup
+  // --- Cleanup ---
+  if (intervalId) clearInterval(intervalId); // Clear timer
   progressBar.stop();
   multibar.stop();
   logger.setActiveMultibar(null);
 
   // --- Final Summary ---
-  // Status 'prompting' indicates full success for this module
-  const successCount = chunks.filter((c) => c.status === "prompting").length;
+  const successCount = finalChunksToProcess.filter(
+    (c) => c.status === "prompting"
+  ).length; // Check against processed list
   logger.info(
-    `Transcription & Adjustment complete: ${successCount} / ${chunksToProcess.length} chunks processed successfully.`
+    `Transcription & Adjustment complete: ${successCount} / ${finalChunksToProcess.length} chunks actively processed.`
   );
 
+  // --- IMPORTANT: Return the original full chunks array, which has updated stati ---
   return { chunks, issues };
 }
 
@@ -244,6 +302,7 @@ interface TranscriberCliOptions {
   transcriptionRetries?: number; // Add retry option
   logFile?: string;
   logLevel?: string;
+  processOnlyPart?: number; // Add part option
 }
 
 async function cliMain() {
@@ -276,6 +335,7 @@ async function cliMain() {
       "Log level (debug, info, warn, error)",
       "info"
     )
+    .option("-P, --part <number>", "Process only a specific part number") // Add CLI option
     .parse(process.argv);
 
   const opts = program.opts();
@@ -294,6 +354,7 @@ async function cliMain() {
     geminiApiKey: opts.apiKey,
     maxConcurrent: opts.concurrent ? parseInt(opts.concurrent) : undefined,
     transcriptionRetries: opts.retries ? parseInt(opts.retries) : undefined, // Parse retry option
+    processOnlyPart: opts.part ? parseInt(opts.part) : undefined, // Parse CLI option
   };
 
   try {
@@ -327,6 +388,7 @@ async function cliMain() {
       apiKeys: {
         gemini: cliOptions.geminiApiKey || process.env.GEMINI_API_KEY,
       },
+      processOnlyPart: cliOptions.processOnlyPart, // Pass option to config
     };
 
     // Check API key before proceeding

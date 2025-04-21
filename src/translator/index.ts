@@ -16,99 +16,148 @@ import {
 } from "../utils/file_utils.js";
 import { generateTranslationPrompt } from "./prompt_generator.js";
 import { callGemini } from "./gemini_translator.js";
-import { callClaude } from "./claude_translator.js";
+import { callClaude, type ClaudeCallResult } from "./claude_translator.js";
+import { parseTranslationResponse } from "../parser/response_parser.js";
+import { validateTranslations } from "../validator/translation_validator.js";
 
 // Helper function for exponential backoff
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Processes a single chunk: generates prompt, calls LLM, handles retries, saves results.
+ * Processes a single chunk: generates prompt, calls LLM, handles retries (API & Validation), parses, validates, saves results.
  */
 async function processTranslationChunk(
   chunk: ChunkInfo,
   config: Config,
-  issues: ProcessingIssue[] // Pass issues array to append directly
+  issues: ProcessingIssue[],
+  isLastChunk: boolean,
+  attemptNum: number = 1
 ): Promise<void> {
   const llmLogsDir = join(config.intermediateDir, "llm_logs");
   const responsesDir = join(config.intermediateDir, "llm_responses");
+  const parsedDir = join(config.intermediateDir, "parsed_data"); // Define parsed data dir
   ensureDir(llmLogsDir);
   ensureDir(responsesDir);
+  ensureDir(parsedDir);
 
-  // 1. Generate Prompt
-  const prompt = await generateTranslationPrompt(chunk, config);
-  if (!prompt) {
-    chunk.status = "failed";
-    chunk.error = "Failed to generate translation prompt.";
-    issues.push({
-      type: "PromptGenError",
-      severity: "error",
-      message: chunk.error,
-      chunkPart: chunk.partNumber,
+  // 1. Generate Prompt (Only needs to happen once per chunk unless retrying the LLM call)
+  // Store prompt locally in case we need to retry the LLM call
+  let prompt: string | null = null;
+  if (attemptNum === 1) {
+    // Only generate on first attempt
+    prompt = await generateTranslationPrompt(chunk, config);
+    if (!prompt) {
+      chunk.status = "failed";
+      chunk.error = "Failed to generate translation prompt.";
+      issues.push({
+        type: "PromptGenError",
+        severity: "error",
+        message: chunk.error,
+        chunkPart: chunk.partNumber,
+      });
+      logger.error(`[Chunk ${chunk.partNumber}] ${chunk.error}`);
+      return;
+    }
+    const requestLogPath = join(
+      llmLogsDir,
+      `part${chunk.partNumber
+        .toString()
+        .padStart(2, "0")}_request_attempt${attemptNum}.json`
+    );
+    await writeToFile(requestLogPath, {
+      timestamp: new Date().toISOString(),
+      model: config.translationModel,
+      prompt,
     });
-    logger.error(`[Chunk ${chunk.partNumber}] ${chunk.error}`);
-    return;
+    chunk.llmRequestLogPath = requestLogPath; // Store latest request path
+  } else {
+    // On retry, try to reload the previously generated prompt
+    const previousRequestPath = join(
+      llmLogsDir,
+      `part${chunk.partNumber
+        .toString()
+        .padStart(2, "0")}_request_attempt1.json`
+    );
+    if (existsSync(previousRequestPath)) {
+      try {
+        const reqData = await readJsonFromFile<any>(previousRequestPath);
+        prompt = reqData?.prompt;
+      } catch (e) {
+        /* ignore if read fails */
+      }
+    }
+    if (!prompt) {
+      chunk.status = "failed";
+      chunk.error = "Failed to retrieve prompt for retry.";
+      issues.push({
+        type: "PromptGenError",
+        severity: "error",
+        message: chunk.error,
+        chunkPart: chunk.partNumber,
+      });
+      logger.error(`[Chunk ${chunk.partNumber}] ${chunk.error}`);
+      return;
+    }
+    logger.info(
+      `[Chunk ${chunk.partNumber}] Using previously generated prompt for validation retry.`
+    );
   }
-  // Log prompt generation
-  const requestLogPath = join(
-    llmLogsDir,
-    `part${chunk.partNumber.toString().padStart(2, "0")}_request.json`
-  );
-  await writeToFile(requestLogPath, {
-    timestamp: new Date().toISOString(),
-    model: config.translationModel,
-    prompt,
-  });
-  chunk.llmRequestLogPath = requestLogPath;
 
-  // 2. Call LLM with Retries (for API errors)
-  let rawResponse: string | null = null;
-  let responseLog: any = null; // To store full response object if possible
-  const maxRetries = config.retries ?? 2; // Use general retries config
-
-  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+  // 2. Call LLM with API Retries (Use general config.retries)
+  let callResult: ClaudeCallResult | { responseText: string | null } | null =
+    null; // Can hold results from either LLM
+  const maxApiRetries = config.retries ?? 2;
+  for (let apiAttempt = 1; apiAttempt <= maxApiRetries + 1; apiAttempt++) {
     chunk.status = "translating";
     logger.debug(
-      `[Chunk ${chunk.partNumber}] Attempt ${attempt}/${
-        maxRetries + 1
-      } to call LLM ${config.translationModel}`
+      `[Chunk ${chunk.partNumber}] LLM Call Attempt ${apiAttempt}/${
+        maxApiRetries + 1
+      }`
     );
+    let currentRawResponse: string | null = null; // Store text response separately
 
     try {
       if (config.translationModel.toLowerCase().includes("claude")) {
-        rawResponse = await callClaude(prompt, config, chunk);
-        // Note: Claude response object is already captured in callClaude error logging if needed
+        const claudeResult = await callClaude(prompt!, config, chunk); // Assert prompt is not null here
+        if (claudeResult) {
+          currentRawResponse = claudeResult.responseText;
+          // Store tokens directly in chunk info
+          chunk.llmTranslationInputTokens = claudeResult.inputTokens;
+          chunk.llmTranslationOutputTokens = claudeResult.outputTokens;
+          callResult = claudeResult; // Store full result
+        }
       } else {
-        // Assume Gemini otherwise
-        rawResponse = await callGemini(prompt, config, chunk);
-        // TODO: Enhance callGemini to optionally return the full response object for logging?
+        currentRawResponse = await callGemini(prompt!, config, chunk); // Assert prompt is not null
+        // For Gemini, we don't have separate token info from this call currently
+        chunk.llmTranslationInputTokens = undefined; // Clear potential old values
+        chunk.llmTranslationOutputTokens = undefined;
+        if (currentRawResponse !== null) {
+          callResult = { responseText: currentRawResponse }; // Store simple result
+        }
       }
 
-      if (rawResponse !== null) {
+      if (currentRawResponse !== null) {
+        // Check if we got text
         logger.debug(
-          `[Chunk ${chunk.partNumber}] Received successful response on attempt ${attempt}.`
+          `[Chunk ${chunk.partNumber}] Received successful response text on attempt ${apiAttempt}.`
         );
         break; // Success, exit retry loop
       }
-      // If rawResponse is null, it means the call function logged an API error
       logger.warn(
-        `[Chunk ${chunk.partNumber}] LLM call failed on attempt ${attempt}. Response was null.`
+        `[Chunk ${chunk.partNumber}] LLM call attempt ${apiAttempt} failed (returned null text).`
       );
     } catch (error: any) {
-      // Catch unexpected errors from the call functions themselves
       logger.error(
         `[Chunk ${
           chunk.partNumber
-        }] Unexpected error during LLM call attempt ${attempt}: ${
+        }] Unexpected error during LLM call attempt ${apiAttempt}: ${
           error.message || error
         }`
       );
-      rawResponse = null; // Ensure it's null on unexpected error
-      // We might not have a structured response to log here
+      callResult = null; // Ensure null on unexpected error
     }
-
-    // If failed and retries remain, wait and retry
-    if (attempt <= maxRetries) {
-      const waitTime = Math.pow(2, attempt) * 1000; // Exponential backoff (2s, 4s, 8s...)
+    if (apiAttempt <= maxApiRetries) {
+      const waitTime = Math.pow(2, apiAttempt) * 1000;
       logger.info(
         `[Chunk ${chunk.partNumber}] Retrying LLM call in ${
           waitTime / 1000
@@ -118,83 +167,237 @@ async function processTranslationChunk(
     } else {
       logger.error(
         `[Chunk ${chunk.partNumber}] LLM call failed after ${
-          maxRetries + 1
-        } attempts.`
+          maxApiRetries + 1
+        } API attempts.`
       );
     }
   }
 
-  // 3. Handle Final Outcome
-  if (rawResponse !== null) {
-    // --- Success ---
-    // Save raw text response
-    const responseFileName = `part${chunk.partNumber
-      .toString()
-      .padStart(2, "0")}_response.txt`;
-    chunk.responsePath = join(responsesDir, responseFileName);
-    await writeToFile(chunk.responsePath, rawResponse);
-
-    // Save structured response log (if we captured one, primarily for Claude errors now)
-    if (responseLog) {
-      const responseLogPath = join(
-        llmLogsDir,
-        `part${chunk.partNumber.toString().padStart(2, "0")}_response.json`
-      );
-      await writeToFile(responseLogPath, responseLog);
-      chunk.llmResponseLogPath = responseLogPath;
-    }
-
-    chunk.status = "parsing"; // Ready for the next step
-    logger.info(
-      `[Chunk ${chunk.partNumber}] Successfully received LLM response.`
-    );
-  } else {
-    // --- Failure ---
+  // 3. Handle LLM Call Outcome (check callResult for overall success)
+  if (callResult === null || callResult.responseText === null) {
     chunk.status = "failed";
     chunk.error =
-      chunk.error || `LLM translation failed after ${maxRetries + 1} attempts.`;
+      chunk.error || `LLM call failed after ${maxApiRetries + 1} attempts.`;
     issues.push({
       type: "TranslationError",
       severity: "error",
       message: chunk.error,
       chunkPart: chunk.partNumber,
     });
-    // Error was already logged during attempts
+    return; // Cannot proceed without a response
+  }
+
+  const rawResponse = callResult.responseText; // We have a valid response text now
+
+  // --- Save raw response ---
+  const responseFileName = `part${chunk.partNumber
+    .toString()
+    .padStart(2, "0")}_response_attempt${attemptNum}.txt`;
+  chunk.responsePath = join(responsesDir, responseFileName);
+  await writeToFile(chunk.responsePath, rawResponse);
+  // TODO: Log structured response if possible (callResult might contain more for Claude)
+
+  // 4. Parse Response
+  logger.info(
+    `[Chunk ${chunk.partNumber}] Parsing LLM response (Attempt ${attemptNum})...`
+  );
+  const { entries: parsedEntries, issues: parsingIssues } =
+    parseTranslationResponse(
+      rawResponse,
+      chunk.partNumber,
+      config.targetLanguages
+    );
+  issues.push(...parsingIssues); // Add parsing issues to the main list
+
+  // 5. Validate Parsed Response
+  logger.info(
+    `[Chunk ${chunk.partNumber}] Validating parsed response (Attempt ${attemptNum})...`
+  );
+  const { isValid: isTranslationValid, validationIssues } =
+    await validateTranslations(
+      chunk.partNumber,
+      parsedEntries,
+      parsingIssues,
+      chunk.srtChunkPath,
+      config,
+      isLastChunk,
+      attemptNum === (config.retries ?? 1)
+    );
+  // Add validation issues regardless of outcome, severity determines action
+  issues.push(...validationIssues);
+
+  // 6. Handle Validation Outcome & Validation Retries
+  const maxValidationRetries = config.retries ?? 1;
+
+  if (isTranslationValid) {
+    // --- Validation Success ---
+    logger.info(
+      `[Chunk ${chunk.partNumber}] Translation passed validation (Attempt ${attemptNum}).`
+    );
+    // Save parsed data
+    const parsedFileName = `part${chunk.partNumber
+      .toString()
+      .padStart(2, "0")}_parsed.json`;
+    chunk.parsedDataPath = join(parsedDir, parsedFileName);
+    const saveSuccess = await writeToFile(chunk.parsedDataPath, parsedEntries);
+    if (saveSuccess) {
+      chunk.status = "completed";
+    } else {
+      chunk.status = "failed";
+      chunk.error = `Failed to save parsed data to ${chunk.parsedDataPath}`;
+      // Ensure this critical save failure is logged as an error issue
+      const saveErrorIssue: ProcessingIssue = {
+        type: "FormatError",
+        severity: "error",
+        message: chunk.error,
+        chunkPart: chunk.partNumber,
+      };
+      issues.push(saveErrorIssue);
+      logger.error(`[Chunk ${chunk.partNumber}] ${chunk.error}`);
+    }
+  } else {
+    // --- Validation Failure (at least one error severity issue found) ---
+    // Log the specific validation errors that caused the failure
+    const errorMessages = validationIssues
+      .filter((vi) => vi.severity === "error")
+      .map((vi) => vi.message)
+      .join("; ");
+    logger.warn(
+      `[Chunk ${
+        chunk.partNumber
+      }] Translation failed validation on attempt ${attemptNum}. Reason(s): ${
+        errorMessages || "See logs"
+      }`
+    );
+
+    if (attemptNum > maxValidationRetries) {
+      logger.error(
+        `[Chunk ${chunk.partNumber}] Translation failed validation after ${attemptNum} attempts.`
+      );
+      chunk.status = "failed";
+      chunk.error =
+        chunk.error ||
+        `Validation failed after ${attemptNum} attempts: ${
+          errorMessages || "Unknown"
+        }`;
+      // Ensure a final error issue is present if somehow missed
+      if (
+        !issues.some(
+          (i) =>
+            i.chunkPart === chunk.partNumber &&
+            i.severity === "error" &&
+            i.type === "ValidationError"
+        )
+      ) {
+        issues.push({
+          type: "ValidationError",
+          severity: "error",
+          message: chunk.error,
+          chunkPart: chunk.partNumber,
+        });
+      }
+    } else {
+      logger.info(
+        `[Chunk ${
+          chunk.partNumber
+        }] Retrying translation LLM call due to validation failure (${
+          maxValidationRetries - attemptNum + 1
+        } total attempts, ${
+          maxValidationRetries - attemptNum
+        } retries remaining)...`
+      );
+      // Recursive call - MAKE SURE TO PASS isLastChunk ALONG!
+      await processTranslationChunk(
+        chunk,
+        config,
+        issues,
+        isLastChunk,
+        attemptNum + 1
+      );
+    }
   }
 }
 
 /**
- * Main function to orchestrate translation for all chunks.
+ * Main orchestrator function for the translation step.
  */
 export async function translate(
   chunks: ChunkInfo[],
   config: Config
 ): Promise<{ chunks: ChunkInfo[]; issues: ProcessingIssue[] }> {
   const issues: ProcessingIssue[] = [];
+  const parsedDataDir = join(config.intermediateDir, "parsed_data");
 
-  // Filter chunks ready for translation (status 'prompting') OR previously failed translation attempts
-  const chunksToProcess = chunks.filter((c) => {
-    const needsProcessing =
-      c.status === "prompting" ||
-      (c.status === "failed" && c.error?.includes("LLM translation failed"));
-    // Also check required inputs exist
+  let chunksToProcess = chunks.filter((c) => {
+    // --- Filter Logic Refactored ---
+
+    // 1. Check required inputs first (essential)
     const inputsExist =
       c.adjustedTranscriptPath && existsSync(c.adjustedTranscriptPath);
-    if (needsProcessing && !inputsExist) {
+    if (!inputsExist) {
       logger.warn(
-        `[Chunk ${c.partNumber}] Marked for translation but missing adjusted transcript: ${c.adjustedTranscriptPath}. Skipping.`
+        `[Chunk ${c.partNumber}] Missing adjusted transcript: ${c.adjustedTranscriptPath}. Skipping.`
       );
-      // Optionally change status back or add specific issue
+      return false;
     }
-    // Also check that EITHER we force processing OR the final output (responsePath) doesn't exist
-    const shouldProcess =
-      config.force || !c.responsePath || !existsSync(c.responsePath);
 
-    return needsProcessing && inputsExist && shouldProcess;
+    // 2. If forced, process regardless of status or output
+    if (config.force) {
+      logger.debug(`[Chunk ${c.partNumber}] Force processing enabled.`);
+      return true;
+    }
+
+    // 3. If not forced, check status and output existence
+    const needsProcessingStatus =
+      c.status === "prompting" ||
+      (c.status === "failed" && c.error?.includes("LLM translation")) ||
+      (c.status === "failed" &&
+        c.error?.includes("Translation validation failed"));
+
+    // Check if final output (parsed data) is missing
+    const parsedPath =
+      c.parsedDataPath ||
+      join(
+        parsedDataDir,
+        `part${c.partNumber.toString().padStart(2, "0")}_parsed.json`
+      );
+    const outputMissing = !existsSync(parsedPath);
+
+    if (needsProcessingStatus) {
+      logger.debug(
+        `[Chunk ${c.partNumber}] Needs processing due to status: ${c.status}`
+      );
+      return true; // Process if status requires it
+    }
+    if (outputMissing) {
+      logger.debug(
+        `[Chunk ${c.partNumber}] Needs processing because output file is missing: ${parsedPath}`
+      );
+      return true; // Process if output is missing
+    }
+
+    // Otherwise, skip
+    logger.debug(
+      `[Chunk ${c.partNumber}] Skipping - Already processed (Status: ${c.status}) and output exists.`
+    );
+    return false;
   });
 
+  // Further filter if processOnlyPart is specified (applied after main filter)
+  if (config.processOnlyPart !== undefined) {
+    const originalCount = chunksToProcess.length;
+    chunksToProcess = chunksToProcess.filter(
+      (c) => c.partNumber === config.processOnlyPart
+    );
+    logger.debug(
+      `Filtered down to ${chunksToProcess.length} chunk(s) based on --part ${config.processOnlyPart} (from ${originalCount}).`
+    );
+  }
+
   if (chunksToProcess.length === 0) {
-    logger.info("No chunks require translation.");
+    logger.info(
+      "No chunks require translation (based on status, file existence, and part filter)."
+    );
     return { chunks, issues };
   }
 
@@ -203,13 +406,15 @@ export async function translate(
   );
 
   // --- Progress Bar Setup ---
+  const startTime = Date.now();
+  let intervalId: Timer | null = null;
   const multibar = new cliProgress.MultiBar(
     {
       clearOnComplete: false,
       hideCursor: true,
       format: `${chalk.cyan(
         "{bar}"
-      )} | {percentage}% | {value}/{total} Chunks | ETA: {eta_formatted} | ${chalk.gray(
+      )} | {percentage}% | {value}/{total} Chunks | ETA: {eta_formatted} | Elapsed: {elapsed}s | ${chalk.gray(
         "{task}"
       )}`,
     },
@@ -217,8 +422,15 @@ export async function translate(
   );
   const progressBar = multibar.create(chunksToProcess.length, 0, {
     task: "Starting translation...",
+    elapsed: "0.0",
   });
   logger.setActiveMultibar(multibar);
+
+  // Update timer to 100ms
+  intervalId = setInterval(() => {
+    const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
+    progressBar.update({ elapsed: elapsedSeconds });
+  }, 100);
 
   // --- Refactored Concurrency Control ---
   const queue = [...chunksToProcess]; // Copy chunks to process into a queue
@@ -227,46 +439,43 @@ export async function translate(
   const activePromises: Promise<void>[] = [];
   let processedCount = 0;
 
+  // --- Determine Last Chunk Number ---
+  const lastChunkNumber =
+    chunksToProcess.length > 0
+      ? Math.max(...chunksToProcess.map((c) => c.partNumber))
+      : -1; // Handle edge case of no chunks to process
+  logger.debug(
+    `Last chunk number identified for processing: ${lastChunkNumber}`
+  );
+
   // Function to start the next task from the queue
   const startNextTask = () => {
-    if (queue.length === 0) return; // Nothing left to start
+    if (queue.length === 0) return;
     const chunk = queue.shift();
     if (!chunk) return;
 
-    const taskPromise = processTranslationChunk(chunk, config, issues)
-      .catch((error: any) => {
-        // Catch unexpected errors from processTranslationChunk itself
-        chunk.status = "failed";
-        chunk.error = `Unexpected error during chunk ${
-          chunk.partNumber
-        } translation processing: ${error.message || error}`;
-        logger.error(`[Chunk ${chunk.partNumber}] ${chunk.error}`);
-        issues.push({
-          type: "TranslationError",
-          severity: "error",
-          message: chunk.error,
-          chunkPart: chunk.partNumber,
-          context: error.stack,
-        });
-      })
-      .finally(() => {
-        processedCount++;
-        progressBar.update(processedCount, {
-          task:
-            chunk.status === "failed"
-              ? `Chunk ${chunk.partNumber} failed!`
-              : `Chunk ${chunk.partNumber} done.`,
-        });
-        // Remove this promise from the active list once done
-        const index = activePromises.indexOf(taskPromise);
-        if (index > -1) {
-          activePromises.splice(index, 1);
-        }
-        // Immediately try to start another task if there's capacity
-        if (activePromises.length < maxConcurrent) {
-          startNextTask();
-        }
+    // Determine if this is the last chunk *being processed in this run*
+    const isLast = chunk.partNumber === lastChunkNumber;
+
+    // Pass isLast flag to processTranslationChunk
+    const taskPromise = processTranslationChunk(
+      chunk,
+      config,
+      issues,
+      isLast,
+      1
+    ).finally(() => {
+      processedCount++;
+      progressBar.update(processedCount, {
+        task:
+          chunk.status === "failed"
+            ? `Chunk ${chunk.partNumber} failed!`
+            : `Chunk ${chunk.partNumber} done.`,
       });
+      const index = activePromises.indexOf(taskPromise);
+      if (index > -1) activePromises.splice(index, 1);
+      if (activePromises.length < maxConcurrent) startNextTask();
+    });
     activePromises.push(taskPromise);
   };
 
@@ -291,11 +500,13 @@ export async function translate(
   // At this point, queue is empty and all active promises have resolved/rejected
 
   // --- Cleanup ---
+  if (intervalId) clearInterval(intervalId); // Clear timer
   progressBar.stop();
   multibar.stop();
   logger.setActiveMultibar(null);
 
-  const successCount = chunks.filter((c) => c.status === "parsing").length;
+  // Status 'completed' indicates success for this module now
+  const successCount = chunks.filter((c) => c.status === "completed").length;
   logger.info(
     `Translation step complete: ${successCount} / ${chunksToProcess.length} chunks processed successfully for translation.`
   );
@@ -318,6 +529,8 @@ interface TranslatorCliOptions {
   logFile?: string;
   logLevel?: string;
   force?: boolean;
+  processOnlyPart?: number;
+  disableTimingValidation?: boolean;
 }
 
 async function cliMain() {
@@ -344,14 +557,24 @@ async function cliMain() {
     .option("--gemini-key <key>", "Gemini API Key (overrides env)")
     .option("--anthropic-key <key>", "Anthropic API Key (overrides env)")
     .option("-c, --concurrent <number>", "Max concurrent LLM calls")
-    .option("-r, --retries <number>", "Max retries for API errors")
+    .option(
+      "-r, --retries <number>",
+      "Max retries for API errors AND validation failures",
+      "2"
+    )
     .option("--log-file <path>", "Path to log file")
     .option("--log-level <level>", "Log level", "info")
     .option(
       "-f, --force",
-      "Force reprocessing even if response files exist",
+      "Force reprocessing even if parsed data files exist",
       false
     )
+    .option(
+      "--no-timing-check",
+      "Disable subtitle timing validation checks",
+      false
+    )
+    .option("-P, --part <number>", "Process only a specific part number")
     .parse(process.argv);
 
   const opts = program.opts();
@@ -373,6 +596,8 @@ async function cliMain() {
     maxConcurrent: opts.concurrent ? parseInt(opts.concurrent) : undefined,
     retries: opts.retries ? parseInt(opts.retries) : undefined,
     force: opts.force || false,
+    processOnlyPart: opts.part ? parseInt(opts.part) : undefined,
+    disableTimingValidation: opts.noTimingCheck || false,
   };
 
   try {
@@ -400,11 +625,12 @@ async function cliMain() {
         cliOptions.maxConcurrent !== undefined ? cliOptions.maxConcurrent : 5,
       retries: cliOptions.retries !== undefined ? cliOptions.retries : 2,
       force: cliOptions.force,
+      disableTimingValidation: cliOptions.disableTimingValidation,
       apiKeys: {
         gemini: cliOptions.geminiApiKey || process.env.GEMINI_API_KEY,
         anthropic: cliOptions.anthropicApiKey || process.env.ANTHROPIC_API_KEY,
       },
-      // Other config fields aren't strictly needed by this module if running standalone
+      processOnlyPart: cliOptions.processOnlyPart,
     };
 
     // Validate necessary API keys based on model
@@ -424,38 +650,55 @@ async function cliMain() {
     }
 
     // Run translation
-    const { chunks: updatedChunks, issues } = await translate(
+    const { chunks: updatedChunksFromRun, issues: runIssues } = await translate(
       chunks,
       config as Config
     );
 
-    // --- Final Reporting ---
-    logger.info(chalk.blueBright("--- Translation Report ---"));
-    const successCount = updatedChunks.filter(
-      (c) => c.status === "parsing"
+    // --- Filter results for reporting based on what was *intended* to run ---
+    const targetedChunks =
+      config.processOnlyPart !== undefined
+        ? updatedChunksFromRun.filter(
+            (c) => c.partNumber === config.processOnlyPart
+          )
+        : updatedChunksFromRun;
+
+    const targetedChunkNumbers = targetedChunks.map((c) => c.partNumber);
+
+    // Filter issues relevant to the processed chunks
+    const relevantIssues = runIssues.filter(
+      (i) =>
+        i.chunkPart === undefined || targetedChunkNumbers.includes(i.chunkPart)
+    );
+
+    // --- Final Reporting (Based on targeted chunks) ---
+    logger.info(chalk.blueBright("--- Translation Step Report ---"));
+    const successCount = targetedChunks.filter(
+      (c) => c.status === "completed"
     ).length;
-    const failCount = updatedChunks.filter(
-      (c) => c.status === "failed" && c.error?.includes("LLM translation")
+    const failCount = targetedChunks.filter(
+      (c) => c.status === "failed"
     ).length;
-    const totalProcessed = updatedChunks.filter(
-      (c) =>
-        c.status === "parsing" ||
-        (c.status === "failed" && c.error?.includes("LLM translation"))
-    ).length;
+    const totalProcessed = targetedChunks.length; // Count only those filtered by --part if applicable
 
     let reportContent = "";
-    reportContent += `${chalk.green("Successful Calls:")} ${successCount}
+    reportContent += `${chalk.green(
+      "Successful Chunks:"
+    )} ${successCount} / ${totalProcessed}
 `;
-    reportContent += `${chalk.red("Failed Calls:")}     ${failCount}
+    reportContent += `${chalk.red(
+      "Failed Chunks:"
+    )}     ${failCount} / ${totalProcessed}
 `;
-    reportContent += `Total Attempted:    ${totalProcessed}
-`;
+    reportContent += `\n${chalk.yellowBright(
+      "Issues Encountered During This Run:"
+    )} (${relevantIssues})\n`;
 
-    if (issues.length > 0) {
-      reportContent += `\n${chalk.yellowBright("Issues Encountered:")} (${
-        issues.length
-      })\n`;
-      issues.forEach((issue) => {
+    if (relevantIssues.length > 0) {
+      reportContent += `\n${chalk.yellowBright(
+        "Issues Encountered During This Run:"
+      )} (${relevantIssues.length})\n`;
+      relevantIssues.forEach((issue) => {
         const prefix =
           issue.severity === "error"
             ? chalk.red("ERROR")
@@ -475,10 +718,10 @@ async function cliMain() {
       })
     );
 
-    // Save updated chunk info
+    // Save the *full* updated chunk info array (includes state of non-processed chunks)
     const saveSuccess = await writeToFile(
       cliOptions.chunkInfoPath,
-      updatedChunks
+      updatedChunksFromRun
     );
     if (saveSuccess) {
       logger.success(
@@ -489,7 +732,10 @@ async function cliMain() {
         `Failed to save updated chunk info to: ${cliOptions.chunkInfoPath}`
       );
     }
-    process.exit(issues.some((i) => i.severity === "error") ? 1 : 0);
+
+    // Determine exit code based on the success/failure of *targeted* chunks
+    const targetedFailed = targetedChunks.some((c) => c.status === "failed");
+    process.exit(targetedFailed ? 1 : 0);
   } catch (err: any) {
     logger.error(`Fatal translator error: ${err.message || err}`);
     console.error(

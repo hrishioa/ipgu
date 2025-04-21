@@ -102,6 +102,12 @@ async function main() {
       "Log level (debug, info, warn, error)",
       "info"
     )
+    .option(
+      "--no-timing-check",
+      "Disable subtitle timing validation checks",
+      false
+    )
+    .option("-P, --part <number>", "Process only a specific part number")
     .parse();
 
   const opts = program.opts();
@@ -138,6 +144,8 @@ async function main() {
         gemini: opts.geminiApiKey || process.env.GEMINI_API_KEY,
         anthropic: opts.anthropicApiKey || process.env.ANTHROPIC_API_KEY,
       },
+      processOnlyPart: opts.part ? parseInt(opts.part) : undefined,
+      disableTimingValidation: opts.noTimingCheck || false,
     };
 
     // Validate configuration
@@ -180,6 +188,13 @@ async function main() {
 
     // Start the pipeline
     info("Starting subtitle translation pipeline");
+    if (config.processOnlyPart !== undefined) {
+      info(
+        chalk.magentaBright(
+          `--- Processing ONLY Part ${config.processOnlyPart} ---`
+        )
+      );
+    }
     debug(
       `Configuration: ${JSON.stringify(
         { ...config, apiKeys: { gemini: "***", anthropic: "***" } },
@@ -195,12 +210,13 @@ async function main() {
     const splitResult = await split({
       videoPath: config.videoPath,
       srtPath: config.srtPath,
-      outputDir: config.intermediateDir, // Splitter outputs to intermediate
+      outputDir: config.intermediateDir,
       chunkDuration: config.chunkDuration,
       chunkOverlap: config.chunkOverlap,
       chunkFormat: config.chunkFormat,
-      maxConcurrent: config.maxConcurrent, // Use main concurrency for ffmpeg
+      maxConcurrent: config.maxConcurrent,
       force: config.force,
+      processOnlyPart: config.processOnlyPart,
     });
     currentChunks = splitResult.chunks;
     allIssues.push(...splitResult.issues);
@@ -210,72 +226,90 @@ async function main() {
       process.exit(1);
     }
 
+    // Filter chunks early if processOnlyPart is set
+    let relevantChunks = currentChunks;
+    if (config.processOnlyPart !== undefined) {
+      relevantChunks = currentChunks.filter(
+        (c) => c.partNumber === config.processOnlyPart
+      );
+      if (relevantChunks.length === 0) {
+        error(
+          `Specified part ${config.processOnlyPart} not found after splitting. Aborting.`
+        );
+        process.exit(1);
+      }
+      info(
+        `Focusing on ${relevantChunks.length} chunk(s) for part ${config.processOnlyPart}.`
+      );
+    }
+
     // --- Step 2: Transcribe & Adjust ---
     info(
       chalk.blueBright("--- Step 2: Transcription & Timestamp Adjustment ---")
     );
-    const transcribeResult = await transcribe(currentChunks, config);
-    currentChunks = transcribeResult.chunks;
+    const transcribeResult = await transcribe(relevantChunks, config);
     allIssues.push(...transcribeResult.issues);
-    if (currentChunks.filter((c) => c.status === "prompting").length === 0) {
-      error(
-        "Transcription/Adjustment failed for all processable chunks. Aborting pipeline."
+    // --- Merge Step 2 Results ---
+    currentChunks = currentChunks.map((originalChunk) => {
+      const updated = transcribeResult.chunks.find(
+        (tc) => tc.partNumber === originalChunk.partNumber
       );
-      // TODO: Add final report generation here
+      return updated || originalChunk; // Return updated chunk if found, else original
+    });
+    // Update relevantChunks based on the *merged* currentChunks
+    relevantChunks =
+      config.processOnlyPart !== undefined
+        ? currentChunks.filter((c) => c.partNumber === config.processOnlyPart)
+        : currentChunks;
+    // --- End Merge ---
+    if (relevantChunks.filter((c) => c.status === "prompting").length === 0) {
+      error(
+        "Transcription/Adjustment failed for all targeted chunks. Aborting pipeline."
+      );
       process.exit(1);
     }
 
     // --- Step 3: Translate ---
     info(chalk.blueBright("--- Step 3: Generating Translations ---"));
-    const translateResult = await translate(currentChunks, config);
-    currentChunks = translateResult.chunks;
+    const translateResult = await translate(relevantChunks, config);
     allIssues.push(...translateResult.issues);
-    if (currentChunks.filter((c) => c.status === "parsing").length === 0) {
-      error(
-        "Translation failed for all processable chunks. Aborting pipeline."
-      );
-      // TODO: Add final report generation here
-      process.exit(1);
-    }
-
-    // --- Step 4: Parse LLM Responses ---
-    info(chalk.blueBright("--- Step 4: Parsing LLM Responses ---"));
-    const parsingPromises = currentChunks
-      .filter((chunk) => chunk.status === "parsing") // Only parse chunks ready for parsing
-      .map(async (chunk) => {
-        const { chunk: updatedChunk, issues: parseIssues } =
-          await parseResponse(chunk, config);
-        allIssues.push(...parseIssues);
-        return updatedChunk;
-      });
-
-    const parsedChunks = await Promise.all(parsingPromises);
-
-    // Update the main chunk array with results from parsing
+    // --- Merge Step 3 Results ---
     currentChunks = currentChunks.map((originalChunk) => {
-      const updated = parsedChunks.find(
-        (pc) => pc.partNumber === originalChunk.partNumber
+      const updated = translateResult.chunks.find(
+        (tc) => tc.partNumber === originalChunk.partNumber
       );
-      return updated || originalChunk;
+      return updated || originalChunk; // Return updated chunk if found, else original
     });
-
-    if (currentChunks.filter((c) => c.status === "validating").length === 0) {
-      error("Parsing failed for all processable chunks. Aborting pipeline.");
-      // TODO: Add final report generation here
+    // Update relevantChunks based on the *merged* currentChunks
+    relevantChunks =
+      config.processOnlyPart !== undefined
+        ? currentChunks.filter((c) => c.partNumber === config.processOnlyPart)
+        : currentChunks;
+    // --- End Merge ---
+    // Check status on the potentially filtered relevantChunks
+    if (relevantChunks.filter((c) => c.status === "completed").length === 0) {
+      error(
+        "Translation/Validation failed for all targeted chunks. Aborting pipeline."
+      );
       process.exit(1);
     }
+
+    // --- Step 4: Parse LLM Responses (Handled within Translate step now) ---
 
     // --- Subsequent Steps ---
-    // TODO: Add steps 5-6: Validate, Merge, Format
+    info(
+      chalk.blueBright("--- Step 4: [Placeholder] Merging & Formatting ---")
+    );
+    // TODO: Implement Merge and Format steps
 
     success(
       chalk.greenBright(
-        "Pipeline finished preliminary steps (Split, Transcribe, Translate, Parse)."
+        "Pipeline finished preliminary steps (Split, Transcribe, Translate+Parse+Validate)."
       )
     );
     console.log(
       boxen(
-        `Pipeline Complete (Up to Parsing Step)\nSee intermediate directory: ${config.intermediateDir}\nTotal Issues: ${allIssues.length}`,
+        `Pipeline Complete (Up to Translation/Validation Step)\nSee intermediate directory: ${config.intermediateDir}\nTotal Issues: ${allIssues.length}`,
         { padding: 1, margin: 1, borderColor: "green" }
       )
     );

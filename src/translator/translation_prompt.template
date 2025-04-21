@@ -8,7 +8,7 @@
 
 So I have these english subs which are great for timing but the translation needs a lot of work. I have the malayalam subs I made which are great to understand the context, the honorifics, the deeper meaning.
 Can you go line by line and make me new subs using the timings from the eng sub, but completely new english and {TARGET_LANGUAGE_NAME} translations using the meanings and story from the malayalam sub? Think about the key tones, preserving the humor and so on before writing.
-The subtitles don't match up by line number - they were done independently. Focus on the numbering of the eng subs and the timings, and for each line look at the whole malayalam sub to figure out what the translation should be. You can do the {TARGET_LANGUAGE_NAME} subtitles - do your best! If you don't have a matching malayalam line, do your best or keep the english line.
+The subtitles don't match up by line number - they were done independently. Focus on the numbering of the eng subs and the timings, and for each line look at the whole malayalam sub to figure out what the translation should be. You can do the {TARGET_LANGUAGE_NAME} subtitles - do your best! If you don't have a matching malayalam line, do your best or keep the english line, or add [SKIP THIS SUBTITLE] in the subline under <better_english_translation>.
 Here's how I want you to respond (don't put sublines in individual markdown blocks, and make sure to close tags properly):
 <subline>
 <original_number>XXX</original_number>

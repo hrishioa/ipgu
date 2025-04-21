@@ -2,6 +2,7 @@ import * as logger from "./logger";
 import { parseSrtFile, calculateSrtTimeSpan } from "./srt_utils";
 import { existsSync } from "fs";
 import { secondsToTimestamp } from "./time_utils";
+import type { Config, SrtEntry } from "../types.js";
 
 /**
  * Represents a parsed timestamp range from a transcript line.
@@ -74,22 +75,24 @@ export function findTimestampRanges(rawTranscript: string): ParsedTimestamp[] {
   return parsedTimestamps;
 }
 
+const MIN_SPAN_COVERAGE_RATIO = 0.75; // Require transcript span to be at least 75% of chunk duration
+
 /**
- * Validates the parsed transcript timestamps based on duration and optionally against a reference SRT.
+ * Validates the parsed transcript timestamps based on duration relative to chunk size and optionally against a reference SRT.
  *
  * @param rawTranscript The raw transcript text.
  * @param referenceSrtPath Optional path to the reference SRT chunk for span comparison.
- * @param minDurationSeconds Minimum required span between first start and last end time in the LLM transcript.
+ * @param config The pipeline configuration object (must include chunkDuration).
  * @param minTimestamps Minimum number of valid timestamp ranges required in the LLM transcript.
- * @param allowedSpanDifferenceRatio Allowed fractional difference between LLM span and reference SRT span (e.g., 0.1 for 10%).
+ * @param allowedSpanDifferenceRatio Allowed fractional difference between LLM span and reference SRT span.
  * @returns Object indicating if validation passed and the reason/details.
  */
 export async function validateTranscriptTimestamps(
   rawTranscript: string,
-  referenceSrtPath?: string, // Optional reference SRT path
-  minDurationSeconds: number = 900,
+  referenceSrtPath: string | undefined,
+  config: Pick<Config, "chunkDuration" | "disableTimingValidation">, // Expect chunkDuration
   minTimestamps: number = 5,
-  allowedSpanDifferenceRatio: number = 0.1 // Default 10% margin
+  allowedSpanDifferenceRatio: number = 0.1
 ): Promise<{
   isValid: boolean;
   detectedLlmSpanSeconds: number | null;
@@ -127,14 +130,19 @@ export async function validateTranscriptTimestamps(
   );
   detectedLlmSpanSeconds = lastLlmEndTime - firstLlmStartTime;
 
-  // 1. Check minimum duration of LLM transcript
-  if (detectedLlmSpanSeconds < minDurationSeconds) {
+  // 1. Check minimum duration relative to chunk duration
+  const requiredMinSpanSeconds = config.chunkDuration * MIN_SPAN_COVERAGE_RATIO;
+  if (detectedLlmSpanSeconds < requiredMinSpanSeconds) {
     return {
       isValid: false,
       detectedLlmSpanSeconds,
       message: `Validation failed: LLM transcript time span (${detectedLlmSpanSeconds.toFixed(
         1
-      )}s) is less than minimum required (${minDurationSeconds}s).`,
+      )}s) is less than minimum required (${requiredMinSpanSeconds.toFixed(
+        1
+      )}s, ${MIN_SPAN_COVERAGE_RATIO * 100}% of chunk duration ${
+        config.chunkDuration
+      }s).`,
     };
   }
 
@@ -144,24 +152,27 @@ export async function validateTranscriptTimestamps(
     if (referenceEntries && referenceEntries.length > 0) {
       referenceSrtSpanSeconds = calculateSrtTimeSpan(referenceEntries);
 
-      // Avoid division by zero or nonsensical comparison if reference is tiny
       if (referenceSrtSpanSeconds > 1.0) {
         const lowerBound =
           referenceSrtSpanSeconds * (1 - allowedSpanDifferenceRatio);
 
+        // Check only if LLM span is significantly SHORTER than reference
         if (detectedLlmSpanSeconds < lowerBound) {
           isValid = false;
+          // Update message to only mention lower bound
           validationMessage = `Validation failed: LLM transcript span (${detectedLlmSpanSeconds.toFixed(
             1
-          )}s) differs too much from reference SRT span (${referenceSrtSpanSeconds.toFixed(
+          )}s) is shorter than allowed lower bound (${lowerBound.toFixed(
             1
-          )}s). Allowed range: > ${lowerBound.toFixed(1)}s`;
+          )}s) based on reference SRT span (${referenceSrtSpanSeconds.toFixed(
+            1
+          )}s).`;
         } else {
           validationMessage += ` LLM span (${detectedLlmSpanSeconds.toFixed(
             1
-          )}s) matches reference span (${referenceSrtSpanSeconds.toFixed(
+          )}s) meets or exceeds minimum duration compared to reference span (${referenceSrtSpanSeconds.toFixed(
             1
-          )}s) within margin.`;
+          )}s).`;
         }
       } else {
         logger.warn(
@@ -191,7 +202,7 @@ export async function validateTranscriptTimestamps(
   return {
     isValid,
     detectedLlmSpanSeconds,
-    referenceSrtSpanSeconds, // Include reference span in result for info
+    referenceSrtSpanSeconds,
     message: validationMessage,
   };
 }

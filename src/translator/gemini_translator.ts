@@ -42,6 +42,9 @@ export async function callGemini(
     const responseStream = await ai.models.generateContentStream({
       model: modelName,
       contents, // Pass the structured contents
+      config: {
+        maxOutputTokens: 65536,
+      },
       // config object is part of the top-level options here, if needed
       // generationConfig: { maxOutputTokens: ..., temperature: ... } // Example if needed
     });

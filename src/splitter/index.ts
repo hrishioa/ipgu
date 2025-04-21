@@ -1,16 +1,21 @@
 #!/usr/bin/env bun
 
-console.log("--- Splitter script starting ---");
-
 import { join } from "path";
 import { existsSync } from "fs";
 import { Command } from "commander";
 import chalk from "chalk";
-import type { ChunkInfo, ProcessingIssue } from "../types";
-import { configureLogger, info, warn, error, success } from "../utils/logger";
-import { ensureDir } from "../utils/file_utils";
-import { splitVideo } from "./video_splitter";
-import { splitSrt } from "./srt_splitter";
+import type { ChunkInfo, ProcessingIssue } from "../types.js";
+import {
+  configureLogger,
+  info,
+  warn,
+  error,
+  success,
+} from "../utils/logger.js";
+import { ensureDir } from "../utils/file_utils.js";
+import { splitVideo, getVideoDuration } from "./video_splitter.js";
+import { splitSrt } from "./srt_splitter.js";
+import { calculateChunks, type TimeChunk } from "../utils/time_utils.js";
 
 interface SplitterOptions {
   videoPath: string;
@@ -21,6 +26,7 @@ interface SplitterOptions {
   chunkFormat: "mp3" | "mp4";
   maxConcurrent: number;
   force: boolean;
+  processOnlyPart?: number;
 }
 
 /**
@@ -38,6 +44,7 @@ export async function split(
     chunkFormat,
     maxConcurrent,
     force,
+    processOnlyPart,
   } = options;
 
   // Validate inputs
@@ -74,33 +81,82 @@ export async function split(
     `Chunk settings: ${chunkDuration}s duration, ${chunkOverlap}s overlap, ${chunkFormat} format`
   );
 
+  // Get duration first to calculate chunks
+  const duration = await getVideoDuration(videoPath);
+  if (!duration) {
+    error(`Failed to get video duration for ${videoPath}`);
+    return {
+      chunks: [],
+      issues: [
+        {
+          type: "SplitError",
+          severity: "error",
+          message: "Failed to get video duration",
+        },
+      ],
+    };
+  }
+
+  // Calculate ALL potential time chunks
+  const allTimeChunks = calculateChunks(duration, chunkDuration, chunkOverlap);
+  let timeChunksToProcess: TimeChunk[] = allTimeChunks;
+  info(`Calculated ${allTimeChunks.length} potential chunks.`);
+
+  // Filter time chunks if only processing a specific part
+  if (processOnlyPart !== undefined) {
+    timeChunksToProcess = allTimeChunks.filter(
+      (tc: TimeChunk) => tc.partNumber === processOnlyPart
+    );
+    if (timeChunksToProcess.length === 0) {
+      error(
+        `Part number ${processOnlyPart} is out of the calculated range (1-${allTimeChunks.length}).`
+      );
+      return {
+        chunks: [],
+        issues: [
+          {
+            type: "SplitError",
+            severity: "error",
+            message: `Invalid part number ${processOnlyPart}`,
+          },
+        ],
+      };
+    }
+    info(`Filtering to process only part ${processOnlyPart}.`);
+  }
+
+  // Now call splitVideo with the potentially filtered timeChunks (or all if no specific part)
   const { chunks, issues } = await splitVideo(
     videoPath,
     mediaDir,
-    chunkDuration,
-    chunkOverlap,
     chunkFormat,
-    maxConcurrent
+    maxConcurrent,
+    timeChunksToProcess,
+    { force: force }
   );
 
   // If we have an SRT file, split it too
   if (srtPath && existsSync(srtPath)) {
     info(`Splitting SRT: ${srtPath}`);
-    const srtResult = await splitSrt(srtPath, chunks, srtDir);
-
-    // Combine issues
+    const srtResult = await splitSrt(srtPath, chunks, srtDir, force);
     issues.push(...srtResult.issues);
   }
 
   // Log summary
   const successCount = chunks.filter((c) => c.status !== "failed").length;
-  const failCount = chunks.length - successCount;
+  const failCount = timeChunksToProcess.length - successCount;
 
   if (failCount === 0) {
-    success(`Splitting complete: ${successCount} chunks created successfully`);
+    success(
+      `Splitting complete: ${successCount} chunk(s) created successfully for part ${
+        processOnlyPart ?? "all"
+      }`
+    );
   } else {
     warn(
-      `Splitting complete with issues: ${successCount} successful, ${failCount} failed`
+      `Splitting complete with issues: ${successCount} successful, ${failCount} failed for part ${
+        processOnlyPart ?? "all"
+      }`
     );
   }
 
@@ -131,6 +187,7 @@ async function main() {
       "Log level (debug, info, warn, error)",
       "info"
     )
+    .option("-P, --part <number>", "Process only a specific part number")
     .parse();
 
   const opts = program.opts();
@@ -152,6 +209,7 @@ async function main() {
       chunkFormat: opts.format === "mp4" ? "mp4" : "mp3",
       maxConcurrent: parseInt(opts.concurrent),
       force: opts.force,
+      processOnlyPart: opts.part ? parseInt(opts.part) : undefined,
     };
 
     const { chunks, issues } = await split(options);

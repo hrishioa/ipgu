@@ -1,11 +1,14 @@
 import { spawn } from "child_process";
-import { join } from "path";
-import type { ChunkInfo, ProcessingIssue } from "../types";
-import { calculateChunks, secondsToTimestamp } from "../utils/time_utils";
-import { ensureDir } from "../utils/file_utils";
-import * as logger from "../utils/logger";
+import { join, basename } from "path";
+// Use type-only import for types
+import type { ChunkInfo, ProcessingIssue, Config } from "../types.js";
+// Import secondsToTimestamp value, and TimeChunk type
+import { secondsToTimestamp, type TimeChunk } from "../utils/time_utils.js";
+import { ensureDir } from "../utils/file_utils.js";
+import * as logger from "../utils/logger.js";
 import cliProgress from "cli-progress";
 import chalk from "chalk";
+import { existsSync } from "fs";
 
 /**
  * Get the duration of a video file using ffprobe
@@ -163,88 +166,69 @@ export async function createMediaChunk(
 }
 
 /**
- * Split a video into chunks based on configuration
- * @param videoPath Path to the video file
- * @param outputDir Directory to save chunks
- * @param chunkDuration Duration of each chunk in seconds
- * @param overlapDuration Overlap duration in seconds
- * @param format Output format ('mp3' or 'mp4')
- * @param maxConcurrent Maximum concurrent ffmpeg processes
- * @returns Promise resolving to chunk info and issues
+ * Split a video into chunks based on pre-calculated time ranges.
  */
 export async function splitVideo(
   videoPath: string,
   outputDir: string,
-  chunkDuration: number,
-  overlapDuration: number,
   format: "mp3" | "mp4",
-  maxConcurrent: number = 3
+  maxConcurrent: number,
+  timeChunks: TimeChunk[],
+  config: Pick<Config, "force">
 ): Promise<{ chunks: ChunkInfo[]; issues: ProcessingIssue[] }> {
   const issues: ProcessingIssue[] = [];
-  const chunks: ChunkInfo[] = [];
+  // No longer calculating chunks here
 
-  // Create output directory
-  if (!ensureDir(outputDir)) {
-    issues.push({
-      type: "SplitError",
-      severity: "error",
-      message: `Failed to create output directory: ${outputDir}`,
-    });
-    return { chunks, issues };
-  }
+  // --- Start Processing ---
+  logger.info(
+    `Processing ${timeChunks.length} specified chunk(s) for splitting...`
+  );
 
-  // Get video duration
-  const duration = await getVideoDuration(videoPath);
-  if (!duration) {
-    issues.push({
-      type: "SplitError",
-      severity: "error",
-      message: "Failed to get video duration",
-    });
-    return { chunks, issues };
-  }
-
-  // Calculate chunks
-  const timeChunks = calculateChunks(duration, chunkDuration, overlapDuration);
-  logger.info(`Splitting video into ${timeChunks.length} chunks`);
-
-  // Initialize Progress Bar
+  // --- Progress Bar Setup ---
+  const startTime = Date.now(); // Record start time
+  let intervalId: Timer | null = null; // Timer ID
   const multibar = new cliProgress.MultiBar(
     {
       clearOnComplete: false,
       hideCursor: true,
+      // Remove token placeholders, keep elapsed time
       format: `${chalk.cyan(
         "{bar}"
-      )} | {percentage}% | {value}/{total} Chunks | ETA: {eta_formatted} | ${chalk.gray(
+      )} | {percentage}% | {value}/{total} Chunks | ETA: {eta_formatted} | Elapsed: {elapsed}s | ${chalk.gray(
         "{task}"
       )}`,
     },
     cliProgress.Presets.shades_classic
   );
-
   const progressBar = multibar.create(timeChunks.length, 0, {
     task: "Splitting video...",
+    elapsed: "0.0",
   });
-  logger.setActiveMultibar(multibar); // Tell logger about the multibar
+  logger.setActiveMultibar(multibar);
 
-  // Create ChunkInfo objects
-  for (const { startTimeSeconds, endTimeSeconds, partNumber } of timeChunks) {
+  // Update timer to 100ms (10 times per second)
+  intervalId = setInterval(() => {
+    const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
+    progressBar.update({ elapsed: elapsedSeconds });
+  }, 100); // Update interval to 100ms
+
+  // Create ChunkInfo objects *only* for the chunks we are processing
+  const chunksToProcess: ChunkInfo[] = timeChunks.map((tc: TimeChunk) => {
     const mediaChunkPath = join(
       outputDir,
-      `part${partNumber.toString().padStart(2, "0")}.${format}`
+      `part${tc.partNumber.toString().padStart(2, "0")}.${format}`
     );
-
-    chunks.push({
-      partNumber,
-      startTimeSeconds,
-      endTimeSeconds,
+    return {
+      partNumber: tc.partNumber,
+      startTimeSeconds: tc.startTimeSeconds,
+      endTimeSeconds: tc.endTimeSeconds,
       mediaChunkPath,
-      status: "pending",
-    });
-  }
+      status: "pending", // Initial status for processing
+    };
+  });
 
-  // Process chunks with concurrency limit
-  const queue = [...chunks];
+  // --- Refactored Concurrency Control ---
+  const queue = [...chunksToProcess];
   const activePromises: Promise<void>[] = [];
   let processedCount = 0;
 
@@ -252,47 +236,66 @@ export async function splitVideo(
     if (queue.length === 0) return;
     const chunk = queue.shift();
     if (!chunk) return;
-
     const taskPromise = (async () => {
       chunk.status = "splitting";
       progressBar.update(processedCount, {
         task: `Splitting chunk ${chunk.partNumber}...`,
       });
-      try {
-        const success = await createMediaChunk(
-          videoPath,
-          chunk.mediaChunkPath!,
-          chunk.startTimeSeconds,
-          chunk.endTimeSeconds,
-          format
+
+      // Check if output file already exists and force is not enabled
+      if (
+        !config.force &&
+        chunk.mediaChunkPath &&
+        existsSync(chunk.mediaChunkPath)
+      ) {
+        logger.debug(
+          `[Chunk ${chunk.partNumber}] Media chunk ${basename(
+            chunk.mediaChunkPath
+          )} already exists. Skipping ffmpeg.`
         );
-        if (success) {
-          chunk.status = "transcribing";
-          logger.debug(`Successfully split part ${chunk.partNumber}`);
-        } else {
+        chunk.status = "transcribing"; // Mark as ready for next step
+        // We still count this as "processed" for the progress bar logic below
+        // Note: We assume if the media chunk exists, the corresponding SRT chunk
+        // (if applicable) should also exist or be recreated by srt_splitter if needed.
+      } else {
+        // --- Run ffmpeg ---
+        try {
+          const success = await createMediaChunk(
+            videoPath,
+            chunk.mediaChunkPath!,
+            chunk.startTimeSeconds,
+            chunk.endTimeSeconds,
+            format
+          );
+          if (success) {
+            chunk.status = "transcribing";
+            logger.debug(`Successfully split part ${chunk.partNumber}`);
+          } else {
+            chunk.status = "failed";
+            chunk.error = "Failed to create media chunk via ffmpeg";
+            issues.push({
+              type: "SplitError",
+              severity: "error",
+              message: `ffmpeg failed for part ${chunk.partNumber}`,
+              chunkPart: chunk.partNumber,
+            });
+            logger.error(`Failed to split part ${chunk.partNumber}`);
+          }
+        } catch (err: any) {
           chunk.status = "failed";
-          chunk.error = "Failed to create media chunk via ffmpeg";
+          chunk.error = `Error during chunk creation: ${err.message || err}`;
           issues.push({
             type: "SplitError",
             severity: "error",
-            message: `ffmpeg failed for part ${chunk.partNumber}`,
+            message: `Unhandled error creating media chunk for part ${chunk.partNumber}`,
             chunkPart: chunk.partNumber,
+            context: String(err),
           });
-          logger.error(`Failed to split part ${chunk.partNumber}`);
+          logger.error(
+            `Unhandled error splitting part ${chunk.partNumber}: ${err}`
+          );
         }
-      } catch (err: any) {
-        chunk.status = "failed";
-        chunk.error = `Error during chunk creation: ${err.message || err}`;
-        issues.push({
-          type: "SplitError",
-          severity: "error",
-          message: `Unhandled error creating media chunk for part ${chunk.partNumber}`,
-          chunkPart: chunk.partNumber,
-          context: String(err),
-        });
-        logger.error(
-          `Unhandled error splitting part ${chunk.partNumber}: ${err}`
-        );
+        // --- End ffmpeg ---
       }
     })();
 
@@ -355,15 +358,19 @@ export async function splitVideo(
     }
   }
 
-  // Cleanup
+  // --- Cleanup ---
+  if (intervalId) clearInterval(intervalId); // Ensure timer is cleared
   progressBar.stop();
   multibar.stop();
-  logger.setActiveMultibar(null); // Clear the multibar from the logger
+  logger.setActiveMultibar(null);
 
-  const successCount = chunks.filter((c) => c.status !== "failed").length;
+  // Return the processed chunks (potentially only one if filtered)
+  // Need to map back to include any errors/status updates
+  const finalChunks = chunksToProcess; // These have been updated in place
+  const successCount = finalChunks.filter((c) => c.status !== "failed").length;
   logger.info(
-    `Video splitting complete: ${successCount} / ${chunks.length} chunks created successfully`
+    `Video splitting complete: ${successCount} / ${finalChunks.length} specified chunk(s) created successfully`
   );
 
-  return { chunks, issues };
+  return { chunks: finalChunks, issues };
 }

@@ -3,69 +3,115 @@ import type { Config, ChunkInfo } from "../types.js";
 import * as logger from "../utils/logger.js";
 
 /**
- * Sends a prompt to a Claude model and returns the raw text response.
+ * Result structure for Claude calls, including tokens.
+ */
+export interface ClaudeCallResult {
+  responseText: string | null;
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
+/**
+ * Sends a prompt to a Claude model using streaming and returns the text response and token counts.
  *
  * @param prompt The complete prompt string.
  * @param config Pipeline configuration (for API key and model name).
  * @param chunk The current chunk (for logging context).
- * @returns A promise resolving to the raw text response or null if an error occurs.
+ * @returns A promise resolving to a ClaudeCallResult object or null if a fatal error occurs.
  */
 export async function callClaude(
   prompt: string,
   config: Config,
   chunk: ChunkInfo
-): Promise<string | null> {
+): Promise<ClaudeCallResult | null> {
   const apiKey = config.apiKeys.anthropic;
   if (!apiKey) {
     logger.error(`[Chunk ${chunk.partNumber}] Missing Anthropic API key.`);
     return null;
   }
 
-  // Use the model name directly from the config
   const modelName = config.translationModel;
   logger.info(
-    `[Chunk ${chunk.partNumber}] Calling Claude model: ${modelName}...`
+    `[Chunk ${chunk.partNumber}] Calling Claude model (stream): ${modelName}...`
   );
+
+  let responseText = "";
+  let inputTokens: number | undefined = undefined;
+  let outputTokens: number | undefined = undefined;
 
   try {
     const client = new Anthropic({ apiKey });
 
-    const message = await client.messages.create({
+    const stream = client.messages.stream({
       model: modelName,
-      max_tokens: 4096, // Max output tokens for Claude 3.5 Sonnet
-      temperature: 0.7, // Adjust temperature as needed
+      max_tokens: 64000, // Still good practice to set a max
       messages: [
         {
           role: "user",
-          content: prompt, // Pass the generated prompt directly
+          content: prompt,
         },
       ],
+      thinking: {
+        type: "enabled",
+        budget_tokens: 9000, // As per example
+      },
+      // Beta features like 'thinking' might not be available/needed for the standard stream,
+      // omit them unless specifically required and tested with the stream endpoint.
     });
 
-    // Extract text content - handles potential non-text blocks gracefully
-    let responseText = "";
-    if (message.content && Array.isArray(message.content)) {
-      for (const block of message.content) {
-        if (block.type === "text") {
-          responseText += block.text;
-        }
-      }
+    // Listen for text delta events to build the response
+    stream.on("text", (textDelta) => {
+      responseText += textDelta;
+      // Optional: Indicate progress (e.g., logger.debug incremental length)
+    });
+
+    // Remove intermediate token listeners
+    // stream.on('messageStart', (message) => { /* ... */ });
+    // stream.on('messageStop', (message) => { /* ... */ });
+
+    stream.on("error", (error) => {
+      logger.error(
+        `[Chunk ${chunk.partNumber}] Claude stream error event: ${
+          error.message || error
+        }`
+      );
+      // This might trigger the outer catch block anyway
+    });
+
+    // Wait for the stream to complete and get the final message object
+    const finalMessage = await stream.finalMessage();
+
+    // Extract final token counts from finalMessage.usage
+    if (finalMessage.usage) {
+      if (finalMessage.usage.input_tokens)
+        inputTokens = finalMessage.usage.input_tokens;
+      if (finalMessage.usage.output_tokens)
+        outputTokens = finalMessage.usage.output_tokens;
+      logger.debug(
+        `[Chunk ${chunk.partNumber}] Claude Final Tokens - Input: ${inputTokens}, Output: ${outputTokens}`
+      );
     }
 
     if (!responseText || responseText.trim().length === 0) {
-      logger.warn(`[Chunk ${chunk.partNumber}] Claude response was empty.`);
-      return null; // Treat empty response as failure
+      logger.warn(
+        `[Chunk ${chunk.partNumber}] Claude stream response was empty.`
+      );
+      // Return empty response but potentially with token counts
+      return { responseText: null, inputTokens, outputTokens };
     }
 
     logger.debug(
-      `[Chunk ${chunk.partNumber}] Received Claude response (Length: ${responseText.length}).`
+      `[Chunk ${chunk.partNumber}] Received Claude stream response (Length: ${responseText.length}).`
     );
-    return responseText;
+    return { responseText, inputTokens, outputTokens };
   } catch (error: any) {
     logger.error(
-      `[Chunk ${chunk.partNumber}] Claude API error: ${error.message || error}`
+      `[Chunk ${
+        chunk.partNumber
+      }] Claude API error during stream setup or finalization: ${
+        error.message || error
+      }`
     );
-    // Log the detailed error structure if possible
     if (error.error?.message) {
       logger.error(
         `[Chunk ${chunk.partNumber}] Claude API Error Details: ${JSON.stringify(
@@ -73,6 +119,6 @@ export async function callClaude(
         )}`
       );
     }
-    return null;
+    return null; // Indicate fatal error
   }
 }

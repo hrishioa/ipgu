@@ -68,27 +68,26 @@ export function formatSrtTiming(
   )}`;
 }
 
+/** Type definition for the result of calculateChunks */
+export interface TimeChunk {
+  startTimeSeconds: number;
+  endTimeSeconds: number;
+  partNumber: number;
+}
+
 /**
  * Calculate chunk time ranges based on total duration, chunk size, and overlap
  * @param totalDurationSeconds Total duration of the media in seconds
  * @param chunkDurationSeconds Duration of each chunk in seconds
  * @param overlapSeconds Overlap between chunks in seconds
- * @returns Array of objects with start and end times for each chunk
+ * @returns Array of TimeChunk objects
  */
 export function calculateChunks(
   totalDurationSeconds: number,
   chunkDurationSeconds: number,
   overlapSeconds: number
-): Array<{
-  startTimeSeconds: number;
-  endTimeSeconds: number;
-  partNumber: number;
-}> {
-  const chunks: Array<{
-    startTimeSeconds: number;
-    endTimeSeconds: number;
-    partNumber: number;
-  }> = [];
+): TimeChunk[] {
+  const chunks: TimeChunk[] = [];
   let startTime = 0;
   let partNumber = 1;
 

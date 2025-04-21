@@ -1,5 +1,6 @@
-import { join } from "path";
+import { join, basename } from "path";
 import { readFile, writeFile } from "fs/promises";
+import { existsSync } from "fs";
 import type { ChunkInfo, ProcessingIssue, SrtEntry } from "../types";
 import { parseSrtTiming, formatSrtTiming } from "../utils/time_utils";
 import { ensureDir } from "../utils/file_utils";
@@ -118,15 +119,25 @@ export function filterEntriesForChunk(
 }
 
 /**
- * Write filtered entries to an SRT file for a chunk
+ * Write filtered entries to an SRT file for a chunk, optionally skipping if exists.
  * @param entries SRT entries to write
  * @param outputPath Output file path
+ * @param force Whether to force writing even if file exists
  * @returns Promise resolving to true if successful
  */
 export async function writeChunkSrt(
   entries: SrtEntry[],
-  outputPath: string
+  outputPath: string,
+  force: boolean
 ): Promise<boolean> {
+  // Skip if file exists and not forcing
+  if (!force && existsSync(outputPath)) {
+    logger.debug(
+      `SRT chunk ${basename(outputPath)} already exists. Skipping write.`
+    );
+    return true; // Treat as success if skipped
+  }
+
   try {
     // Format the entries as SRT content
     let content = "";
@@ -150,12 +161,14 @@ export async function writeChunkSrt(
  * @param srtPath Path to the SRT file
  * @param chunks Chunk info objects with time ranges
  * @param outputDir Directory to save chunk SRTs
+ * @param force Whether to force writing even if file exists
  * @returns Promise resolving to updated chunks and issues
  */
 export async function splitSrt(
   srtPath: string,
   chunks: ChunkInfo[],
-  outputDir: string
+  outputDir: string,
+  force: boolean
 ): Promise<{ chunks: ChunkInfo[]; issues: ProcessingIssue[] }> {
   const issues: ProcessingIssue[] = [];
 
@@ -182,7 +195,9 @@ export async function splitSrt(
     return { chunks, issues };
   }
 
-  logger.info(`Splitting SRT file into ${chunks.length} chunks`);
+  logger.info(
+    `Splitting SRT file into ${chunks.length} chunks (Force: ${force})`
+  );
 
   // Process each chunk
   for (const chunk of chunks) {
@@ -211,8 +226,8 @@ export async function splitSrt(
     );
     chunk.srtChunkPath = srtChunkPath;
 
-    // Write chunk SRT
-    const success = await writeChunkSrt(chunkEntries, srtChunkPath);
+    // Pass force flag to write function
+    const success = await writeChunkSrt(chunkEntries, srtChunkPath, force);
     if (!success) {
       issues.push({
         type: "SplitError",
@@ -220,10 +235,6 @@ export async function splitSrt(
         message: `Failed to write SRT chunk for part ${chunk.partNumber}`,
         chunkPart: chunk.partNumber,
       });
-    } else {
-      logger.debug(
-        `Created SRT chunk ${chunk.partNumber} with ${chunkEntries.length} subtitles`
-      );
     }
   }
 

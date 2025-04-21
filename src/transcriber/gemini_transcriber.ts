@@ -6,7 +6,6 @@ import * as logger from "../utils/logger.js";
 import { validateTranscriptTimestamps } from "../utils/transcript_utils.js";
 import { writeToFile } from "../utils/file_utils.js";
 
-const MIN_TRANSCRIPT_DURATION_S = 900; // 15 minutes
 const MIN_TRANSCRIPT_LINES = 5;
 
 // Helper to generate language string for prompt
@@ -125,7 +124,7 @@ relative (mm:ss - mm:ss) - (line)`,
     const validationResult = await validateTranscriptTimestamps(
       fullTranscript,
       chunk.srtChunkPath,
-      MIN_TRANSCRIPT_DURATION_S,
+      config,
       MIN_TRANSCRIPT_LINES
     );
 

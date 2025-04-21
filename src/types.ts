@@ -22,6 +22,8 @@ export interface Config {
     gemini?: string;
     anthropic?: string;
   };
+  processOnlyPart?: number; // Optional: Process only this specific part number
+  disableTimingValidation?: boolean; // Optional: Disable timing checks in validator
 }
 
 // Information about each processed chunk
@@ -37,6 +39,8 @@ export interface ChunkInfo {
   responsePath?: string; // Path to the RAW LLM text response file
   llmRequestLogPath?: string; // Path to structured JSON log of the request sent to LLM
   llmResponseLogPath?: string; // Path to structured JSON log of the full LLM response object
+  llmTranslationInputTokens?: number; // Add field for input tokens
+  llmTranslationOutputTokens?: number; // Add field for output tokens
   parsedDataPath?: string; // Path to parsed JSON from response
   failedTranscriptPath?: string; // Path to raw transcript if it failed validation
   status:
