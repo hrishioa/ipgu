@@ -92,13 +92,14 @@ export async function transcribe(
   });
   logger.setActiveMultibar(multibar);
 
-  // Process chunks with concurrency
-  let processedCount = 0;
+  // --- Refactored Concurrency Control ---
   const queue = [...chunksToProcess];
   const maxConcurrent =
     config.maxConcurrent > 0 ? config.maxConcurrent : queue.length;
+  const activePromises: Promise<void>[] = [];
+  let processedCount = 0;
 
-  const processNext = async () => {
+  const startNextTranscribeTask = () => {
     if (queue.length === 0) return;
     const chunk = queue.shift();
     if (!chunk) return;
@@ -114,13 +115,13 @@ export async function transcribe(
       task: `Transcribing chunk ${chunk.partNumber}...`,
     });
 
-    try {
+    const taskPromise = (async () => {
+      // Wrap core logic
       const { transcript: rawTranscript, issues: chunkIssues } =
         await transcribeChunk(chunk, config);
-      issues.push(...chunkIssues); // Collect issues
+      issues.push(...chunkIssues);
 
       if (rawTranscript !== null) {
-        // --- Save Raw Transcript ---
         const rawFileName = `part${chunk.partNumber
           .toString()
           .padStart(2, "0")}_raw.txt`;
@@ -130,14 +131,10 @@ export async function transcribe(
           `[Chunk ${chunk.partNumber}] Saved raw transcript to ${chunk.rawTranscriptPath}`
         );
 
-        // --- Adjust Timestamps ---
-        logger.debug(`[Chunk ${chunk.partNumber}] Adjusting timestamps...`);
         const adjustedTranscript = adjustTranscriptTimestamps(
           rawTranscript,
           chunk.startTimeSeconds
         );
-
-        // --- Save Adjusted Transcript ---
         const adjustedFileName = `part${chunk.partNumber
           .toString()
           .padStart(2, "0")}_adjusted.txt`;
@@ -147,57 +144,78 @@ export async function transcribe(
           `[Chunk ${chunk.partNumber}] Saved adjusted transcript to ${chunk.adjustedTranscriptPath}`
         );
 
-        // Update status for the next pipeline step
         chunk.status = "prompting";
         logger.debug(`Successfully processed chunk ${chunk.partNumber}`);
       } else {
-        // Transcription failed or failed validation after retries
         chunk.status = "failed";
-        // Error message/details should be in the issues array and chunk.error from transcribeChunk
         chunk.error =
           chunk.error ||
           "Transcription/Validation failed after retries (check logs/failed file)";
         logger.warn(
           `[Chunk ${chunk.partNumber}] Failed transcription/validation.`
         );
-        // Note: transcribeChunk now saves the failed transcript to rawTranscriptDir if validation fails
       }
-    } catch (err: any) {
-      logger.error(
-        `Unexpected error during transcription wrapper for chunk ${
-          chunk.partNumber
-        }: ${err.message || err}`
-      );
-      chunk.status = "failed";
-      chunk.error = `Unexpected transcription error: ${err.message || err}`;
-      issues.push({
-        type: "TranscriptionError",
-        severity: "error",
-        message: `Unexpected transcription error for chunk ${chunk.partNumber}`,
-        chunkPart: chunk.partNumber,
-        context: err.stack,
+    })()
+      .catch((error: any) => {
+        // Catch unexpected errors
+        if (chunk) {
+          chunk.status = "failed";
+          chunk.error = `Unexpected error during chunk ${
+            chunk.partNumber
+          } transcription/adjustment: ${error.message || error}`;
+          logger.error(`[Chunk ${chunk.partNumber}] ${chunk.error}`);
+          issues.push({
+            type: "TranscriptionError",
+            severity: "error",
+            message: chunk.error,
+            chunkPart: chunk.partNumber,
+            context: error.stack,
+          });
+        } else {
+          logger.error(
+            `Unexpected error during transcription processing (chunk undefined): ${
+              error.message || error
+            }`
+          );
+          issues.push({
+            type: "TranscriptionError",
+            severity: "error",
+            message: `Unexpected transcription error: ${
+              error.message || error
+            }`,
+            context: error.stack,
+          });
+        }
+      })
+      .finally(() => {
+        processedCount++;
+        progressBar.update(processedCount, {
+          // Use update instead of increment for clarity
+          task:
+            chunk.status === "failed"
+              ? `Chunk ${chunk.partNumber} failed!`
+              : `Chunk ${chunk.partNumber} done.`,
+        });
+        const index = activePromises.indexOf(taskPromise);
+        if (index > -1) activePromises.splice(index, 1);
+        if (activePromises.length < maxConcurrent) startNextTranscribeTask();
       });
-    } finally {
-      processedCount++;
-      progressBar.increment(1, {
-        task:
-          chunk.status === "failed"
-            ? `Chunk ${chunk.partNumber} failed!`
-            : `Chunk ${chunk.partNumber} done.`,
-      });
-    }
+    activePromises.push(taskPromise);
   };
 
-  // Start initial concurrent tasks
-  const initialTasks = Array.from(
-    { length: Math.min(maxConcurrent, queue.length) },
-    () => processNext()
-  );
-  await Promise.all(initialTasks);
+  // Start initial batch
+  for (let i = 0; i < Math.min(maxConcurrent, queue.length); i++) {
+    startNextTranscribeTask();
+  }
 
-  // Continue processing as tasks complete
-  while (processedCount < chunksToProcess.length) {
-    await processNext(); // Effectively waits for the next available slot via async/await
+  // Wait loop
+  while (activePromises.length > 0 || queue.length > 0) {
+    while (activePromises.length < maxConcurrent && queue.length > 0) {
+      startNextTranscribeTask();
+    }
+    if (activePromises.length > 0) {
+      await Promise.race(activePromises);
+    }
   }
 
   // Cleanup

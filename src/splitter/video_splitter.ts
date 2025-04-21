@@ -244,79 +244,115 @@ export async function splitVideo(
   }
 
   // Process chunks with concurrency limit
-  const activePromises: Promise<void>[] = [];
   const queue = [...chunks];
+  const activePromises: Promise<void>[] = [];
   let processedCount = 0;
 
-  const processNext = async () => {
-    if (queue.length === 0) return; // No more chunks to process
-
+  const startNextSplitTask = () => {
+    if (queue.length === 0) return;
     const chunk = queue.shift();
     if (!chunk) return;
 
-    // Mark as splitting
-    chunk.status = "splitting";
-    progressBar.update(processedCount, {
-      task: `Processing chunk ${chunk.partNumber}...`,
-    });
-
-    try {
-      const success = await createMediaChunk(
-        videoPath,
-        chunk.mediaChunkPath!,
-        chunk.startTimeSeconds,
-        chunk.endTimeSeconds,
-        format
-      );
-
-      if (success) {
-        chunk.status = "transcribing"; // Next stage
-        logger.info(`Successfully split part ${chunk.partNumber}`);
-      } else {
+    const taskPromise = (async () => {
+      chunk.status = "splitting";
+      progressBar.update(processedCount, {
+        task: `Splitting chunk ${chunk.partNumber}...`,
+      });
+      try {
+        const success = await createMediaChunk(
+          videoPath,
+          chunk.mediaChunkPath!,
+          chunk.startTimeSeconds,
+          chunk.endTimeSeconds,
+          format
+        );
+        if (success) {
+          chunk.status = "transcribing";
+          logger.debug(`Successfully split part ${chunk.partNumber}`);
+        } else {
+          chunk.status = "failed";
+          chunk.error = "Failed to create media chunk via ffmpeg";
+          issues.push({
+            type: "SplitError",
+            severity: "error",
+            message: `ffmpeg failed for part ${chunk.partNumber}`,
+            chunkPart: chunk.partNumber,
+          });
+          logger.error(`Failed to split part ${chunk.partNumber}`);
+        }
+      } catch (err: any) {
         chunk.status = "failed";
-        chunk.error = "Failed to create media chunk";
+        chunk.error = `Error during chunk creation: ${err.message || err}`;
         issues.push({
           type: "SplitError",
           severity: "error",
-          message: `Failed to create media chunk for part ${chunk.partNumber}`,
+          message: `Unhandled error creating media chunk for part ${chunk.partNumber}`,
           chunkPart: chunk.partNumber,
+          context: String(err),
         });
-        logger.error(`Failed to split part ${chunk.partNumber}`);
+        logger.error(
+          `Unhandled error splitting part ${chunk.partNumber}: ${err}`
+        );
       }
-    } catch (err) {
-      chunk.status = "failed";
-      chunk.error = `Error during chunk creation: ${err}`;
-      issues.push({
-        type: "SplitError",
-        severity: "error",
-        message: `Unhandled error creating media chunk for part ${chunk.partNumber}`,
-        chunkPart: chunk.partNumber,
-        context: String(err),
+    })();
+
+    taskPromise
+      .catch((error: any) => {
+        if (chunk) {
+          chunk.status = "failed";
+          chunk.error = `Unexpected error during chunk ${
+            chunk.partNumber
+          } split processing: ${error.message || error}`;
+          logger.error(`[Chunk ${chunk.partNumber}] ${chunk.error}`);
+          issues.push({
+            type: "SplitError",
+            severity: "error",
+            message: chunk.error,
+            chunkPart: chunk.partNumber,
+            context: error.stack,
+          });
+        } else {
+          logger.error(
+            `Unexpected error during split processing (chunk undefined): ${
+              error.message || error
+            }`
+          );
+          issues.push({
+            type: "SplitError",
+            severity: "error",
+            message: `Unexpected split error: ${error.message || error}`,
+            context: error.stack,
+          });
+        }
+      })
+      .finally(() => {
+        processedCount++;
+        progressBar.update(processedCount, {
+          task:
+            chunk.status === "failed"
+              ? `Chunk ${chunk.partNumber} failed!`
+              : `Chunk ${chunk.partNumber} done.`,
+        });
+        const index = activePromises.indexOf(taskPromise);
+        if (index > -1) activePromises.splice(index, 1);
+        if (activePromises.length < maxConcurrent) startNextSplitTask();
       });
-      logger.error(
-        `Unhandled error splitting part ${chunk.partNumber}: ${err}`
-      );
-    } finally {
-      processedCount++;
-      progressBar.update(processedCount, {
-        task:
-          chunk.status === "failed"
-            ? `Chunk ${chunk.partNumber} failed`
-            : `Chunk ${chunk.partNumber} done`,
-      });
-    }
+    activePromises.push(taskPromise);
   };
 
-  // Fill the initial concurrent queue
-  const initialTasks = Array.from(
-    { length: Math.min(maxConcurrent, queue.length) },
-    () => processNext()
-  );
-  await Promise.all(initialTasks);
+  // Start initial batch
+  for (let i = 0; i < Math.min(maxConcurrent, queue.length); i++) {
+    startNextSplitTask();
+  }
 
-  // Continue processing as tasks complete
-  while (processedCount < chunks.length) {
-    await processNext();
+  // Wait loop
+  while (activePromises.length > 0 || queue.length > 0) {
+    while (activePromises.length < maxConcurrent && queue.length > 0) {
+      startNextSplitTask();
+    }
+    if (activePromises.length > 0) {
+      await Promise.race(activePromises);
+    }
   }
 
   // Cleanup

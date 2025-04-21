@@ -3,7 +3,7 @@ import { existsSync } from "fs";
 import * as logger from "../utils/logger.js";
 import type { ChunkInfo, Config } from "../types.js";
 
-const DEFAULT_TEMPLATE_PATH = "./translation_prompt.template";
+const DEFAULT_TEMPLATE_PATH = __dirname + "/translation_prompt.template";
 
 /**
  * Loads the prompt template content.
