@@ -18,7 +18,7 @@ import { ensureDir } from "./utils/file_utils.js";
 import { split } from "./splitter/index.js";
 import { transcribe } from "./transcriber/index.js";
 import { translate } from "./translator/index.js"; // Import the new translator function
-import { parseResponse } from "./parser/index.js"; // Import parser function
+import { finalize } from "./finalizer/index.js"; // Import finalizer
 
 /**
  * Subtitle Pipeline main entry point
@@ -108,6 +108,20 @@ async function main() {
       false
     )
     .option("-P, --part <number>", "Process only a specific part number")
+    .option(
+      "--use-response-timings",
+      "Use timings parsed from LLM instead of original SRT",
+      false
+    )
+    .option(
+      "--mark-fallbacks",
+      "Add [Original] marker to fallback subtitles",
+      true
+    )
+    .option(
+      "--colors <eng,tgt>",
+      "Set subtitle colors (hex, e.g., FFFFFF,00FFFF)"
+    )
     .parse();
 
   const opts = program.opts();
@@ -120,6 +134,15 @@ async function main() {
   });
 
   try {
+    // Parse colors
+    let engColor: string | undefined;
+    let tgtColor: string | undefined;
+    if (opts.colors) {
+      [engColor, tgtColor] = opts.colors
+        .split(",")
+        .map((c: string) => c.trim());
+    }
+
     // Build configuration
     const config: Config = {
       videoPath: opts.video,
@@ -146,6 +169,11 @@ async function main() {
       },
       processOnlyPart: opts.part ? parseInt(opts.part) : undefined,
       disableTimingValidation: opts.noTimingCheck || false,
+      useResponseTimings: opts.useResponseTimings || false,
+      markFallbacks:
+        opts.markFallbacks !== undefined ? opts.markFallbacks : true,
+      subtitleColorEnglish: engColor,
+      subtitleColorTarget: tgtColor,
     };
 
     // Validate configuration
@@ -294,25 +322,41 @@ async function main() {
       process.exit(1);
     }
 
-    // --- Step 4: Parse LLM Responses (Handled within Translate step now) ---
+    // --- Step 4: Finalize Subtitles ---
+    info(chalk.blueBright("--- Step 4: Finalizing Subtitles ---"));
+    const finalizeResult = await finalize(currentChunks, config);
+    allIssues.push(...finalizeResult.issues);
+    const finalSrtPath = finalizeResult.finalSrtPath;
 
-    // --- Subsequent Steps ---
-    info(
-      chalk.blueBright("--- Step 4: [Placeholder] Merging & Formatting ---")
-    );
-    // TODO: Implement Merge and Format steps
-
-    success(
-      chalk.greenBright(
-        "Pipeline finished preliminary steps (Split, Transcribe, Translate+Parse+Validate)."
-      )
-    );
-    console.log(
-      boxen(
-        `Pipeline Complete (Up to Translation/Validation Step)\nSee intermediate directory: ${config.intermediateDir}\nTotal Issues: ${allIssues.length}`,
-        { padding: 1, margin: 1, borderColor: "green" }
-      )
-    );
+    // --- Pipeline Complete ---
+    if (finalSrtPath) {
+      info("Pipeline completed successfully!");
+      console.log(
+        boxen(
+          `Final SRT: ${finalSrtPath}\nIntermediate Files: ${config.intermediateDir}\nTotal Issues Logged: ${allIssues.length}`,
+          {
+            padding: 1,
+            margin: 1,
+            borderColor: "green",
+            title: "Pipeline Summary",
+          }
+        )
+      );
+    } else {
+      error("Pipeline completed, but failed to generate final SRT file.");
+      console.log(
+        boxen(
+          `Final SRT generation failed.\nCheck logs and intermediate files: ${config.intermediateDir}\nTotal Issues Logged: ${allIssues.length}`,
+          {
+            padding: 1,
+            margin: 1,
+            borderColor: "red",
+            title: "Pipeline Failed",
+          }
+        )
+      );
+      process.exit(1);
+    }
   } catch (err: any) {
     error(`Fatal pipeline error: ${err.message || err}`);
     console.error(

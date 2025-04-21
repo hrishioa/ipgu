@@ -24,6 +24,10 @@ export interface Config {
   };
   processOnlyPart?: number; // Optional: Process only this specific part number
   disableTimingValidation?: boolean; // Optional: Disable timing checks in validator
+  useResponseTimings?: boolean; // Use timings from LLM response instead of original SRT
+  markFallbacks?: boolean; // Add marker to subtitles using original text
+  subtitleColorEnglish?: string; // Color for English text
+  subtitleColorTarget?: string; // Color for the target language text
 }
 
 // Information about each processed chunk
@@ -108,4 +112,16 @@ export interface ProcessingIssue {
   subtitleId?: string | number; // ID from <original_number> if available
   context?: string; // Snippet or relevant data
   lineNumber?: number; // Optional line number from parser
+}
+
+// Entry for the final, merged SRT file before formatting
+export interface FinalSubtitleEntry {
+  originalId: string; // Keep original ID for reference/debugging
+  finalId: number; // Sequential ID for final output
+  startTimeSeconds: number;
+  endTimeSeconds: number;
+  translations: Record<string, string | null>; // { 'english': 'Hello', 'korean': '안녕하세요' }
+  isFallback?: boolean; // Did we use original SRT text?
+  markFallback?: boolean; // Should this fallback be marked in output?
+  timingSource: "original" | "llm"; // Where did the timing come from?
 }

@@ -329,58 +329,70 @@ export async function translate(
   const parsedDataDir = join(config.intermediateDir, "parsed_data");
 
   let chunksToProcess = chunks.filter((c) => {
-    // --- Filter Logic Refactored ---
+    // --- Filter Logic Re-Refined ---
 
-    // 1. Check required inputs first (essential)
+    // 1. Check required inputs (essential)
     const inputsExist =
       c.adjustedTranscriptPath && existsSync(c.adjustedTranscriptPath);
     if (!inputsExist) {
       logger.warn(
-        `[Chunk ${c.partNumber}] Missing adjusted transcript: ${c.adjustedTranscriptPath}. Skipping.`
+        `[Chunk ${c.partNumber}] Missing adjusted transcript: ${c.adjustedTranscriptPath}. Skipping translation.`
       );
       return false;
     }
 
-    // 2. If forced, process regardless of status or output
+    // 2. If forced, process regardless of output existence
     if (config.force) {
-      logger.debug(`[Chunk ${c.partNumber}] Force processing enabled.`);
-      return true;
+      logger.debug(
+        `[Chunk ${c.partNumber}] Force processing enabled for translation.`
+      );
+      // Still check if status is valid to start from
+      if (c.status === "prompting" || c.status === "failed") {
+        return true;
+      } else {
+        logger.warn(
+          `[Chunk ${c.partNumber}] Force processing enabled, but chunk status is ${c.status} (expected prompting/failed). Skipping.`
+        );
+        return false;
+      }
     }
 
-    // 3. If not forced, check status and output existence
-    const needsProcessingStatus =
-      c.status === "prompting" ||
-      (c.status === "failed" && c.error?.includes("LLM translation")) ||
-      (c.status === "failed" &&
-        c.error?.includes("Translation validation failed"));
-
-    // Check if final output (parsed data) is missing
+    // 3. If not forced, check if final output (parsed data) already exists
     const parsedPath =
       c.parsedDataPath ||
       join(
         parsedDataDir,
         `part${c.partNumber.toString().padStart(2, "0")}_parsed.json`
       );
-    const outputMissing = !existsSync(parsedPath);
+    if (existsSync(parsedPath)) {
+      logger.debug(
+        `[Chunk ${c.partNumber}] Skipping translation: Output parsed file already exists (${parsedPath}) and force not enabled.`
+      );
+      // Ensure status reflects completion if skipped
+      if (c.status !== "completed") {
+        c.status = "completed"; // Mark as completed if output exists
+      }
+      return false;
+    }
+
+    // 4. If not forced and output missing, check status is ready for processing
+    const needsProcessingStatus =
+      c.status === "prompting" ||
+      (c.status === "failed" && c.error?.includes("LLM translation")) ||
+      (c.status === "failed" &&
+        c.error?.includes("Translation validation failed"));
 
     if (needsProcessingStatus) {
       logger.debug(
-        `[Chunk ${c.partNumber}] Needs processing due to status: ${c.status}`
+        `[Chunk ${c.partNumber}] Output missing and status (${c.status}) indicates processing needed.`
       );
-      return true; // Process if status requires it
-    }
-    if (outputMissing) {
-      logger.debug(
-        `[Chunk ${c.partNumber}] Needs processing because output file is missing: ${parsedPath}`
+      return true; // Process
+    } else {
+      logger.warn(
+        `[Chunk ${c.partNumber}] Output missing, but status is ${c.status} (expected prompting or failed). Skipping.`
       );
-      return true; // Process if output is missing
+      return false; // Skip if status isn't ready
     }
-
-    // Otherwise, skip
-    logger.debug(
-      `[Chunk ${c.partNumber}] Skipping - Already processed (Status: ${c.status}) and output exists.`
-    );
-    return false;
   });
 
   // Further filter if processOnlyPart is specified (applied after main filter)
