@@ -89,8 +89,7 @@ async function main() {
     )
     .option(
       "-i, --intermediate <dir>",
-      "Directory to store intermediate files",
-      "./intermediate"
+      "Directory to store intermediate files (defaults to {outputDir}/intermediates if not specified)"
     )
     .option(
       "--source-languages <langs>",
@@ -98,40 +97,25 @@ async function main() {
     )
     .option(
       "-l, --target-language <lang>",
-      "The target language (besides English)",
-      "Korean"
+      "The target language (besides English)"
     )
-    .option(
-      "-tm, --transcription-model <model>",
-      "Model for transcription",
-      "gemini-1.5-flash-latest"
-    )
-    .option(
-      "-tl, --translation-model <model>",
-      "Model for translation",
-      "claude-3-5-sonnet-20240620" // Default translation model
-    )
+    .option("-tm, --transcription-model <model>", "Model for transcription")
+    .option("-tl, --translation-model <model>", "Model for translation")
     .option(
       "--translation-prompt-template <path>", // Option for template
       "Path to custom translation prompt template file (uses default if not set)"
     )
-    .option(
-      "-d, --chunk-duration <seconds>",
-      "Chunk duration in seconds",
-      "1200"
-    )
-    .option("-o, --chunk-overlap <seconds>", "Chunk overlap in seconds", "300")
-    .option("-f, --chunk-format <format>", "Chunk format (mp3 or mp4)", "mp3")
-    .option("-c, --max-concurrent <number>", "Max concurrent processes", "5") // Default 5
+    .option("-d, --chunk-duration <seconds>", "Chunk duration in seconds")
+    .option("-o, --chunk-overlap <seconds>", "Chunk overlap in seconds")
+    .option("-f, --chunk-format <format>", "Chunk format (mp3 or mp4)")
+    .option("-c, --max-concurrent <number>", "Max concurrent processes")
     .option(
       "-r, --retries <number>",
-      "Number of retries for general API calls (not transcription validation)",
-      "2"
+      "Number of retries for general API calls (not transcription validation)"
     )
     .option(
       "--transcription-retries <number>",
-      "Number of retries for transcription validation failure",
-      "1"
+      "Number of retries for transcription validation failure"
     )
     .option(
       "--force",
@@ -186,9 +170,13 @@ async function main() {
 Examples:
   # Use the Gemini 2.5 preset (fast, high-concurrency)
   bun start --preset 2.5 --video movie.mp4 --srt subtitles.srt --output ./output
+  # Intermediate files will be stored in ./output/intermediates
 
   # Use the Gemini+Claude preset (higher quality translation, slower)
   bun start --preset 2.5-claude --video movie.mp4 --srt subtitles.srt --output ./output
+
+  # Specify a custom intermediate directory
+  bun start --preset 2.5 --video movie.mp4 --output ./output --intermediate ./custom_intermediates
 
   # Use a preset but override specific parameters
   bun start --preset 2.5 --video movie.mp4 --max-concurrent 6 --chunk-duration 900
@@ -253,8 +241,10 @@ Examples:
       // Always required parameters
       videoPath: opts.video,
       srtPath: opts.srt,
-      outputDir: opts.output,
-      intermediateDir: opts.intermediate,
+      outputDir: opts.output || "./output",
+      // Make intermediate default to a subfolder of output when not specified
+      intermediateDir:
+        opts.intermediate || join(opts.output || "./output", "intermediates"),
 
       // Parameters with preset defaults that can be overridden
       transcriptionModel:
@@ -298,7 +288,7 @@ Examples:
       sourceLanguages: opts.sourceLanguages
         ? opts.sourceLanguages.split(",").map((lang: string) => lang.trim())
         : undefined,
-      targetLanguages: [opts.targetLanguage?.trim() || "Korean"],
+      targetLanguages: [opts.targetLanguage || "Korean"],
       translationPromptTemplatePath: opts.translationPromptTemplate,
       force: opts.force || false,
       apiKeys: {
