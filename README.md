@@ -1,6 +1,6 @@
 <h1 align="center">
   <br>
-  <a href="https://github.com/hrishioa/ipgu"><img src="assets/logo.png" alt="Ipgu" width="200"></a>
+  <a href="https://github.com/hrishioa/ipgu"><img src="assets/logotransparent.png" alt="Ipgu" width="200"></a>
   <br>
   ipgu - Timestable AI translation Pipeline
   <br>
