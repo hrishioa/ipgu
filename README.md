@@ -1,6 +1,6 @@
 <h1 align="center">
   <br>
-  <a href="https://github.com/hrishioa/lumentis"><img src="https://github.com/hrishioa/lumentis/assets/973967/73832318-5e90-4191-bbbb-324524ff4468" alt="Lumentis" width="200"></a>
+  <a href="https://github.com/hrishioa/ipgu"><img src="assets/logo.png" alt="Ipgu" width="200"></a>
   <br>
   ipgu - Timestable AI translation Pipeline
   <br>
@@ -19,8 +19,6 @@ Timing synchronization is fragile, context gets lost, and countless valuable pie
 This project, **`ipgu`** (named after the Korean word for "Entrance" - **입구**), aims to build that bridge. It leverages the power of modern Large Language Models (LLMs) to automate the creation of accurate, timed, bilingual subtitles, opening an entrance for content to reach new audiences and fostering deeper cross-cultural understanding.
 
 `ipgu` is an end-to-end command-line tool that takes your video file, intelligently processes it through state-of-the-art AI for transcription and translation, and generates high-quality, bilingual SRT subtitles ready for use.
-
-## Demo
 
 ![ipgu Demo](assets/movieshot.png))
 
