@@ -53,7 +53,7 @@ const PRESETS: Record<string, PresetConfig> = {
   },
   "2.5-claude": {
     transcriptionModel: "gemini-2.5-pro-preview-03-25",
-    translationModel: "claude-3-7-sonnet",
+    translationModel: "claude-3-7-sonnet-latest",
     maxConcurrent: 3,
     chunkDuration: 600,
     chunkFormat: "mp3",
