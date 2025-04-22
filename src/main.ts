@@ -21,6 +21,51 @@ import { finalize } from "./finalizer/index.js"; // Import finalizer
 import { calculateCost, MODEL_COSTS } from "./config/models.js"; // Import cost data
 import { getVideoDuration } from "./splitter/video_splitter.js"; // Need duration for cost/min
 
+// Define preset type
+type PresetConfig = {
+  transcriptionModel: string;
+  translationModel: string;
+  maxConcurrent: number;
+  chunkDuration: number;
+  chunkFormat: "mp3" | "mp4";
+  chunkOverlap: number;
+  logLevel: string;
+  noTimingCheck: boolean;
+  retries: number;
+  transcriptionRetries: number;
+  useResponseTimings: boolean;
+};
+
+// Define presets
+const PRESETS: Record<string, PresetConfig> = {
+  "2.5": {
+    transcriptionModel: "gemini-2.5-pro-preview-03-25",
+    translationModel: "gemini-2.5-pro-preview-03-25",
+    maxConcurrent: 12,
+    chunkDuration: 1200,
+    chunkFormat: "mp3",
+    chunkOverlap: 120,
+    logLevel: "info",
+    noTimingCheck: true,
+    retries: 3,
+    transcriptionRetries: 3,
+    useResponseTimings: true,
+  },
+  "2.5-claude": {
+    transcriptionModel: "gemini-2.5-pro-preview-03-25",
+    translationModel: "claude-3-7-sonnet",
+    maxConcurrent: 3,
+    chunkDuration: 600,
+    chunkFormat: "mp3",
+    chunkOverlap: 60,
+    logLevel: "info",
+    noTimingCheck: true,
+    retries: 3,
+    transcriptionRetries: 3,
+    useResponseTimings: true,
+  },
+};
+
 /**
  * Subtitle Pipeline main entry point
  */
@@ -31,6 +76,10 @@ async function main() {
     .name("subtitle-pipeline")
     .description("End-to-end subtitle translation pipeline")
     .version("1.0.0")
+    .option(
+      "--preset <name>",
+      "Use a preset configuration: '2.5' (Gemini 2.5 for all), '2.5-claude' (Gemini 2.5 + Claude 3.7). Individual parameters still override presets."
+    )
     .requiredOption("-v, --video <path>", "Path to video file")
     .option("-s, --srt <path>", "Path to reference SRT subtitle file")
     .option(
@@ -131,6 +180,20 @@ async function main() {
       "--input-offset <seconds>",
       "Apply offset (in seconds, can be negative) to input SRT timings"
     )
+    .addHelpText(
+      "after",
+      `
+Examples:
+  # Use the Gemini 2.5 preset (fast, high-concurrency)
+  bun start --preset 2.5 --video movie.mp4 --srt subtitles.srt --output ./output
+
+  # Use the Gemini+Claude preset (higher quality translation, slower)
+  bun start --preset 2.5-claude --video movie.mp4 --srt subtitles.srt --output ./output
+
+  # Use a preset but override specific parameters
+  bun start --preset 2.5 --video movie.mp4 --max-concurrent 6 --chunk-duration 900
+    `
+    )
     .parse();
 
   const opts = program.opts();
@@ -154,26 +217,90 @@ async function main() {
         .map((c: string) => c.trim());
     }
 
-    // Build configuration
+    // Apply preset if specified
+    let presetOptions: Partial<PresetConfig> = {};
+    if (opts.preset) {
+      const preset = PRESETS[opts.preset];
+      if (!preset) {
+        logger.warn(
+          `Unknown preset "${opts.preset}". Available presets: ${Object.keys(
+            PRESETS
+          ).join(", ")}`
+        );
+      } else {
+        logger.info(
+          `Applying "${opts.preset}" preset. Individual parameters will override preset values.`
+        );
+        presetOptions = preset;
+
+        // Log the preset configuration for user reference
+        logger.info(`Preset values:
+  - transcription: ${preset.transcriptionModel}
+  - translation: ${preset.translationModel}
+  - concurrent: ${preset.maxConcurrent}
+  - chunks: ${preset.chunkDuration}s with ${preset.chunkOverlap}s overlap
+  - retries: ${preset.retries} (translation), ${
+          preset.transcriptionRetries
+        } (transcription)
+  - format: ${preset.chunkFormat}, timing checks: ${
+          preset.noTimingCheck ? "disabled" : "enabled"
+        }`);
+      }
+    }
+
+    // Build configuration, allowing CLI options to override preset values
     const config: Config = {
+      // Always required parameters
       videoPath: opts.video,
       srtPath: opts.srt,
       outputDir: opts.output,
       intermediateDir: opts.intermediate,
+
+      // Parameters with preset defaults that can be overridden
+      transcriptionModel:
+        opts.transcriptionModel ||
+        presetOptions.transcriptionModel ||
+        "gemini-1.5-flash-latest",
+      translationModel:
+        opts.translationModel ||
+        presetOptions.translationModel ||
+        "claude-3-5-sonnet-20240620",
+      chunkDuration: opts.chunkDuration
+        ? parseInt(opts.chunkDuration)
+        : presetOptions.chunkDuration || 1200,
+      chunkOverlap: opts.chunkOverlap
+        ? parseInt(opts.chunkOverlap)
+        : presetOptions.chunkOverlap || 300,
+      chunkFormat: opts.chunkFormat
+        ? opts.chunkFormat === "mp4"
+          ? "mp4"
+          : "mp3"
+        : presetOptions.chunkFormat || "mp3",
+      maxConcurrent: opts.maxConcurrent
+        ? parseInt(opts.maxConcurrent)
+        : presetOptions.maxConcurrent || 5,
+      retries: opts.retries
+        ? parseInt(opts.retries)
+        : presetOptions.retries || 2,
+      transcriptionRetries: opts.transcriptionRetries
+        ? parseInt(opts.transcriptionRetries)
+        : presetOptions.transcriptionRetries || 1,
+      disableTimingValidation:
+        opts.noTimingCheck !== undefined
+          ? opts.noTimingCheck
+          : presetOptions.noTimingCheck || false,
+      useResponseTimings:
+        opts.useResponseTimings !== undefined
+          ? opts.useResponseTimings
+          : presetOptions.useResponseTimings || false,
+
+      // Other parameters that aren't in presets but can still be specified
       sourceLanguages: opts.sourceLanguages
         ? opts.sourceLanguages.split(",").map((lang: string) => lang.trim())
         : undefined,
-      targetLanguages: [opts.targetLanguage.trim()],
+      targetLanguages: [opts.targetLanguage?.trim() || "Korean"],
       translationPromptTemplatePath: opts.translationPromptTemplate,
-      transcriptionModel: opts.transcriptionModel,
-      translationModel: opts.translationModel,
-      chunkDuration: parseInt(opts.chunkDuration),
-      chunkOverlap: parseInt(opts.chunkOverlap),
-      chunkFormat: opts.chunkFormat === "mp4" ? "mp4" : "mp3",
-      maxConcurrent: parseInt(opts.maxConcurrent),
-      retries: parseInt(opts.retries),
-      transcriptionRetries: parseInt(opts.transcriptionRetries),
-      force: opts.force,
+      force: opts.force || false,
       apiKeys: {
         gemini: opts.geminiApiKey || process.env.GEMINI_API_KEY,
         anthropic: opts.anthropicApiKey || process.env.ANTHROPIC_API_KEY,
@@ -184,8 +311,6 @@ async function main() {
       inputOffsetSeconds:
         opts.inputOffset !== undefined ? parseFloat(opts.inputOffset) : 0,
       processOnlyPart: opts.part ? parseInt(opts.part) : undefined,
-      disableTimingValidation: opts.noTimingCheck || false,
-      useResponseTimings: opts.useResponseTimings || false,
       markFallbacks:
         opts.markFallbacks !== undefined ? opts.markFallbacks : true,
       subtitleColorEnglish: engColor,
