@@ -385,27 +385,4 @@ ipgu/
 3. **Running Individual Components:** Most modules (`splitter`, `transcriber`, `translator`, `parser`, `finalizer`) can be run standalone for debugging. Check their `--help` flag, e.g., `bun src/splitter/index.ts --help`.
 4. **Linting/Formatting:** (Add details if you set up ESLint/Prettier).
 
-## Contributing
-
-Contributions are welcome! Please follow these general steps:
-
-1. Fork the repository.
-2. Create a new branch (`git checkout -b feature/your-feature-name`).
-3. Make your changes.
-4. Ensure code adheres to existing style (add linting/formatting steps if applicable).
-5. (Add testing instructions if you have tests).
-6. Commit your changes (`git commit -am 'Add some feature'`).
-7. Push to the branch (`git push origin feature/your-feature-name`).
-8. Create a new Pull Request.
-
-_(Please add any specific contribution guidelines you might have, e.g., regarding testing, commit message formats, etc.)_
-
-## License
-
-This project is licensed under the **YOUR_LICENSE_NAME** License. See the `LICENSE` file for details.
-
-_(Replace YOUR_LICENSE_NAME with your chosen license, e.g., MIT, Apache 2.0, and add a LICENSE file to your repository)_
-
-## The Vision: An Open Entrance
-
 `ipgu` strives to lower the barrier for sharing stories across languages. By automating the complex process of subtitle creation, we hope to open countless new entrances for understanding and connection through the media we all love.
