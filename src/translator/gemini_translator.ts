@@ -3,19 +3,24 @@ import type { Config, ChunkInfo } from "../types.js";
 import * as logger from "../utils/logger.js";
 
 /**
- * Sends a prompt to a Gemini model using the generateContentStream method
- * and returns the raw text response.
- *
- * @param prompt The complete prompt string.
- * @param config Pipeline configuration (for API key and model name).
- * @param chunk The current chunk (for logging context).
- * @returns A promise resolving to the raw text response or null if an error occurs.
+ * Result structure for Gemini calls, including tokens.
+ */
+export interface GeminiCallResult {
+  responseText: string | null;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}
+
+/**
+ * Sends a prompt to a Gemini model using generateContent
+ * and returns the text response and token counts.
  */
 export async function callGemini(
   prompt: string,
   config: Config,
   chunk: ChunkInfo
-): Promise<string | null> {
+): Promise<GeminiCallResult | null> {
   const apiKey = config.apiKeys.gemini;
   if (!apiKey) {
     logger.error(`[Chunk ${chunk.partNumber}] Missing Gemini API key.`);
@@ -24,66 +29,60 @@ export async function callGemini(
 
   const modelName = config.translationModel;
   logger.info(
-    `[Chunk ${chunk.partNumber}] Calling Gemini model (stream): ${modelName}...`
+    `[Chunk ${chunk.partNumber}] Calling Gemini model: ${modelName}...`
   );
 
   try {
     const ai = new GoogleGenAI({ apiKey });
+    const model = ai.getGenerativeModel({ model: modelName });
 
-    // Construct the contents array, mimicking process-prompts.ts structure
-    const contents = [
-      {
-        role: "user",
-        parts: [{ text: prompt }], // Pass the prompt text here
-      },
-    ];
+    const result = await model.generateContent(prompt);
+    const response = result.response;
+    const text = response.text();
 
-    // Use generateContentStream as in process-prompts.ts
-    const responseStream = await ai.models.generateContentStream({
-      model: modelName,
-      contents, // Pass the structured contents
-      config: {
-        maxOutputTokens: 65536,
-      },
-      // config object is part of the top-level options here, if needed
-      // generationConfig: { maxOutputTokens: ..., temperature: ... } // Example if needed
-    });
+    // Extract token counts from usageMetadata if available
+    const usageMetadata = response.usageMetadata;
+    const inputTokens = usageMetadata?.promptTokenCount;
+    const outputTokens = usageMetadata?.candidatesTokenCount; // Often represents output
+    const totalTokens = usageMetadata?.totalTokenCount;
 
-    // Collect the streamed response
-    let fullResponse = "";
-    for await (const chunk of responseStream) {
-      // Ensure chunk.text exists and is a string
-      if (chunk.text && typeof chunk.text === "string") {
-        fullResponse += chunk.text;
-      }
+    if (inputTokens !== undefined || outputTokens !== undefined) {
+      logger.debug(
+        `[Chunk ${chunk.partNumber}] Gemini Tokens - Input: ${
+          inputTokens ?? "N/A"
+        }, Output: ${outputTokens ?? "N/A"}, Total: ${totalTokens ?? "N/A"}`
+      );
     }
 
-    if (!fullResponse || fullResponse.trim().length === 0) {
-      logger.warn(
-        `[Chunk ${chunk.partNumber}] Gemini stream response was empty.`
-      );
-      return null;
+    if (!text || text.trim().length === 0) {
+      logger.warn(`[Chunk ${chunk.partNumber}] Gemini response was empty.`);
+      // Return result object even if text is null, tokens might be present
+      return { responseText: null, inputTokens, outputTokens, totalTokens };
     }
     logger.debug(
-      `[Chunk ${chunk.partNumber}] Received Gemini stream response (Length: ${fullResponse.length}).`
+      `[Chunk ${chunk.partNumber}] Received Gemini response (Length: ${text.length}).`
     );
-    return fullResponse;
+    return { responseText: text, inputTokens, outputTokens, totalTokens };
   } catch (error: any) {
     logger.error(
-      `[Chunk ${chunk.partNumber}] Gemini API error (stream): ${
-        error.message || error
-      }`
+      `[Chunk ${chunk.partNumber}] Gemini API error: ${error.message || error}`
     );
-    // Attempt to log more details from the error structure if possible
-    try {
+    if (
+      error.response?.candidates?.length &&
+      error.response?.candidates[0]?.finishReason
+    ) {
       logger.error(
-        `[Chunk ${chunk.partNumber}] Gemini Error Details: ${JSON.stringify(
-          error
+        `[Chunk ${chunk.partNumber}] Gemini API Error Details: FinishReason=${
+          error.response.candidates[0].finishReason
+        }, SafetyRatings=${JSON.stringify(
+          error.response.candidates[0].safetyRatings
         )}`
       );
-    } catch (jsonError) {
-      /* Ignore if error cannot be stringified */
+    } else if (error.message?.includes("request failed")) {
+      logger.error(
+        `[Chunk ${chunk.partNumber}] Gemini API network/status error: ${error.message}`
+      );
     }
-    return null;
+    return null; // Fatal error
   }
 }

@@ -45,8 +45,10 @@ export interface ChunkInfo {
   responsePath?: string; // Path to the RAW LLM text response file
   llmRequestLogPath?: string; // Path to structured JSON log of the request sent to LLM
   llmResponseLogPath?: string; // Path to structured JSON log of the full LLM response object
-  llmTranslationInputTokens?: number; // Add field for input tokens
-  llmTranslationOutputTokens?: number; // Add field for output tokens
+  llmTranscriptionInputTokens?: number; // Tokens for transcription step
+  llmTranscriptionOutputTokens?: number;
+  llmTranslationInputTokens?: number;
+  llmTranslationOutputTokens?: number;
   parsedDataPath?: string; // Path to parsed JSON from response
   failedTranscriptPath?: string; // Path to raw transcript if it failed validation
   status:
@@ -126,4 +128,34 @@ export interface FinalSubtitleEntry {
   isFallback?: boolean; // Did we use original SRT text?
   markFallback?: boolean; // Should this fallback be marked in output?
   timingSource: "original" | "llm"; // Where did the timing come from?
+}
+
+/** Structure for cost breakdown */
+export interface CostBreakdown {
+  totalCost: number;
+  transcriptionCost: number;
+  translationCost: number;
+  costPerModel: Record<string, number>; // e.g., { 'claude-3-5-sonnet': 1.23, 'gemini-1.5-flash': 0.45 }
+  costPerMinute?: number; // Total cost / video duration in minutes
+  warnings: string[]; // e.g., "Token count unavailable for transcription model X"
+}
+
+/** Structure for the final report */
+export interface PipelineReport {
+  startTime: string;
+  endTime: string;
+  totalDurationSeconds: number;
+  videoDurationSeconds?: number; // Add original video duration
+  configUsed: Config;
+  overallStatus: "Success" | "SuccessWithIssues" | "Failed";
+  summary: {
+    chunksTotal: number;
+    chunksCompleted: number;
+    chunksFailed: number;
+    // Add token/cost summary?
+  };
+  issues: ProcessingIssue[];
+  cost?: CostBreakdown; // Ensure this uses the exported type
+  outputFilePath?: string;
+  reportFilePath: string;
 }

@@ -54,14 +54,16 @@ bun start \
   --intermediate-dir ./intermediate_files \
   --output-dir ./final_output \
   --target-language Korean \
-  --transcription-model gemini-1.5-flash-latest \
-  --translation-model claude-3-5-sonnet-20240620 \
-  --source-languages ml,en \
+  --transcription-model gemini-2.5-pro-preview-03-25 \
+  --translation-model gemini-2.5-pro-preview-03-25 \
+  --source-languages malayalam \
   --log-level info \
   --log-file ./final_output/pipeline.log \
-  --chunk-duration 900 \
-  --input-offset -0.5 \
-  --output-offset 0.2
+  --chunk-duration 1200 \
+  --retries 3 \
+  --transcription-retries 3 \
+  --max-concurrent 4 \
+  --chunk-overlap 120
 ```
 
 ### Running Individual Modules Standalone

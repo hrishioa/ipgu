@@ -511,7 +511,7 @@ async function cliMain() {
   logger.configureLogger({
     logToFile: !!opts.logFile,
     logFilePath: opts.logFile,
-    minLogLevel: opts.logLevel || "info",
+    consoleLogLevel: opts.logLevel || "info",
   });
 
   // Parse colors
@@ -626,7 +626,7 @@ async function cliMain() {
 
     process.exit(errorCount > 0 ? 1 : 0);
   } catch (err: any) {
-    logger.error(`Fatal finalizer error: ${err.message || err}`);
+    logger.error(`Fatal finalizer error: ${err.message || err}`, err.stack);
     console.error(
       boxen(chalk.red(`Fatal Error: ${err.message || err}`), {
         padding: 1,

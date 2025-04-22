@@ -208,7 +208,7 @@ async function main() {
   configureLogger({
     logToFile: !!opts.logFile,
     logFilePath: opts.logFile,
-    minLogLevel: opts.logLevel,
+    consoleLogLevel: opts.logLevel || "info",
   });
 
   try {
@@ -248,8 +248,8 @@ async function main() {
     info(`Chunk info saved to: ${outputInfoPath}`);
 
     process.exit(issues.some((i) => i.severity === "error") ? 1 : 0);
-  } catch (err) {
-    error(`Fatal error: ${err}`);
+  } catch (err: any) {
+    error(`Fatal error: ${err.message || err}`, err.stack);
     process.exit(1);
   }
 }

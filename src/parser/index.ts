@@ -177,7 +177,7 @@ async function cliMain() {
   logger.configureLogger({
     logToFile: !!opts.logFile,
     logFilePath: opts.logFile,
-    minLogLevel: opts.logLevel || "info",
+    consoleLogLevel: opts.logLevel || "info",
   });
 
   const cliOptions: ParserCliOptions = {

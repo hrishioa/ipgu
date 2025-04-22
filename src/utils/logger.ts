@@ -12,7 +12,8 @@ export interface LoggerConfig {
   logToConsole: boolean;
   logToFile: boolean;
   logFilePath?: string;
-  minLogLevel: LogLevel;
+  consoleLogLevel: LogLevel; // Separate level for console
+  fileLogLevel: LogLevel; // Separate level for file
   multibar?: MultiBar | null;
 }
 
@@ -20,7 +21,8 @@ export interface LoggerConfig {
 const defaultConfig: LoggerConfig = {
   logToConsole: true,
   logToFile: false,
-  minLogLevel: "info",
+  consoleLogLevel: "info", // Default console level
+  fileLogLevel: "debug", // Default file level to debug
   multibar: null,
 };
 
@@ -32,6 +34,14 @@ let currentConfig: LoggerConfig = { ...defaultConfig };
  * @param config Configuration options
  */
 export function configureLogger(config: Partial<LoggerConfig>): void {
+  // Ensure default fileLogLevel is debug if file logging is enabled but level not specified
+  if (
+    config.logToFile === true &&
+    config.logFilePath &&
+    config.fileLogLevel === undefined
+  ) {
+    config.fileLogLevel = "debug";
+  }
   currentConfig = { ...currentConfig, ...config };
 
   // Create log directory if logging to file
@@ -66,11 +76,13 @@ const logLevelValue: Record<LogLevel, number> = {
   error: 3,
 };
 
-/**
- * Should this log level be displayed based on configuration?
- */
-function shouldLog(level: LogLevel): boolean {
-  return logLevelValue[level] >= logLevelValue[currentConfig.minLogLevel];
+/** Checks if a level should be logged to a specific target (console or file). */
+function shouldLog(level: LogLevel, target: "console" | "file"): boolean {
+  const threshold =
+    target === "console"
+      ? currentConfig.consoleLogLevel
+      : currentConfig.fileLogLevel;
+  return logLevelValue[level] >= logLevelValue[threshold];
 }
 
 /**
@@ -89,17 +101,14 @@ function logToConsole(
   formattedMessage: string,
   coloredMessage: string
 ): void {
-  if (!currentConfig.logToConsole) return;
+  if (!currentConfig.logToConsole || !shouldLog(level, "console")) return; // Check console level
 
   let messageForConsole = coloredMessage;
-
-  // Append note about log file for errors when bar is active and file logging is on
   if (currentConfig.multibar && currentConfig.logToFile && level === "error") {
     messageForConsole += chalk.gray(" (See log file for full details)");
   }
 
   if (currentConfig.multibar) {
-    // Use MultiBar's log method
     currentConfig.multibar.log(`${messageForConsole}\n`);
   } else {
     // Standard console logging
@@ -120,71 +129,79 @@ function logToConsole(
   }
 }
 
-/**
- * Write log to file if configured
- */
-async function logToFile(formattedMessage: string): Promise<void> {
-  if (currentConfig.logToFile && currentConfig.logFilePath) {
-    try {
-      await appendFile(currentConfig.logFilePath, formattedMessage + "\n");
-    } catch (error) {
-      // Use direct console.error here to avoid potential loop if logging itself fails
-      console.error(`[Logger Error] Failed to write to log file: ${error}`);
-    }
+/** Write log to file if configured AND level meets file threshold. */
+async function logToFile(
+  level: LogLevel,
+  formattedMessage: string,
+  context?: string
+): Promise<void> {
+  // Check file logging enabled AND file log level threshold
+  if (
+    !currentConfig.logToFile ||
+    !currentConfig.logFilePath ||
+    !shouldLog(level, "file")
+  )
+    return;
+
+  let messageToWrite = formattedMessage;
+  // Always include full context (like stack trace) in file log if present
+  if (context) {
+    messageToWrite += `\n  Context: ${context}`;
+  }
+
+  try {
+    await appendFile(currentConfig.logFilePath, messageToWrite + "\n");
+  } catch (error) {
+    console.error(`[Logger Error] Failed to write to log file: ${error}`);
   }
 }
 
 /**
  * Log a debug message
  */
-export function debug(message: string): void {
-  if (!shouldLog("debug")) return;
-
+export function debug(message: string, context?: string): void {
+  if (!shouldLog("debug", "console") && !shouldLog("debug", "file")) return;
   const formattedMessage = formatLogMessage("debug", message);
   logToConsole("debug", formattedMessage, chalk.gray(formattedMessage));
-  logToFile(formattedMessage);
+  logToFile("debug", formattedMessage, context);
 }
 
 /**
  * Log an info message
  */
-export function info(message: string): void {
-  if (!shouldLog("info")) return;
-
+export function info(message: string, context?: string): void {
+  if (!shouldLog("info", "console") && !shouldLog("info", "file")) return;
   const formattedMessage = formatLogMessage("info", message);
   logToConsole("info", formattedMessage, chalk.blue(formattedMessage));
-  logToFile(formattedMessage);
+  logToFile("info", formattedMessage, context);
 }
 
 /**
  * Log a warning message
  */
-export function warn(message: string): void {
-  if (!shouldLog("warn")) return;
-
+export function warn(message: string, context?: string): void {
+  if (!shouldLog("warn", "console") && !shouldLog("warn", "file")) return;
   const formattedMessage = formatLogMessage("warn", message);
   logToConsole("warn", formattedMessage, chalk.yellow(formattedMessage));
-  logToFile(formattedMessage);
+  logToFile("warn", formattedMessage, context);
 }
 
 /**
  * Log an error message
  */
-export function error(message: string): void {
-  if (!shouldLog("error")) return;
-
+export function error(message: string, context?: string): void {
+  if (!shouldLog("error", "console") && !shouldLog("error", "file")) return;
   const formattedMessage = formatLogMessage("error", message);
   logToConsole("error", formattedMessage, chalk.red(formattedMessage));
-  logToFile(formattedMessage);
+  logToFile("error", formattedMessage, context); // Pass context here
 }
 
 /**
  * Log a success message (info level with green color)
  */
-export function success(message: string): void {
-  if (!shouldLog("info")) return;
-
+export function success(message: string, context?: string): void {
+  if (!shouldLog("info", "console") && !shouldLog("info", "file")) return;
   const formattedMessage = formatLogMessage("info", message);
   logToConsole("info", formattedMessage, chalk.green(formattedMessage));
-  logToFile(formattedMessage);
+  logToFile("info", formattedMessage, context);
 }

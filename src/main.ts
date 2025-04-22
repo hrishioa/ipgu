@@ -5,20 +5,21 @@ import { join } from "path";
 import { existsSync } from "fs";
 import chalk from "chalk";
 import boxen from "boxen"; // Import boxen
-import type { Config, ChunkInfo, ProcessingIssue } from "./types.js";
-import {
-  configureLogger,
-  info,
-  warn,
-  error,
-  success,
-  debug,
-} from "./utils/logger.js";
+import type {
+  Config,
+  ChunkInfo,
+  ProcessingIssue,
+  PipelineReport,
+  CostBreakdown,
+} from "./types.js";
+import * as logger from "./utils/logger.js";
 import { ensureDir } from "./utils/file_utils.js";
 import { split } from "./splitter/index.js";
 import { transcribe } from "./transcriber/index.js";
 import { translate } from "./translator/index.js"; // Import the new translator function
 import { finalize } from "./finalizer/index.js"; // Import finalizer
+import { calculateCost, MODEL_COSTS } from "./config/models.js"; // Import cost data
+import { getVideoDuration } from "./splitter/video_splitter.js"; // Need duration for cost/min
 
 /**
  * Subtitle Pipeline main entry point
@@ -135,10 +136,12 @@ async function main() {
   const opts = program.opts();
 
   // Configure logger
-  configureLogger({
+  logger.configureLogger({
     logToFile: !!opts.logFile,
     logFilePath: opts.logFile,
-    minLogLevel: opts.logLevel,
+    // Pass console level from CLI, default file level remains debug
+    consoleLogLevel: opts.logLevel || "info",
+    // fileLogLevel will default to 'debug' inside configureLogger if logToFile is true
   });
 
   try {
@@ -190,14 +193,14 @@ async function main() {
 
     // Validate configuration
     if (!existsSync(config.videoPath)) {
-      error(`Video file does not exist: ${config.videoPath}`);
+      logger.error(`Video file does not exist: ${config.videoPath}`);
       process.exit(1);
     }
     if (config.srtPath && !existsSync(config.srtPath)) {
-      warn(`Reference SRT file does not exist: ${config.srtPath}`);
+      logger.warn(`Reference SRT file does not exist: ${config.srtPath}`);
     }
     if (!config.apiKeys.gemini) {
-      error(
+      logger.error(
         "Gemini API key is required for transcription. Provide via --gemini-api-key or GEMINI_API_KEY env var."
       );
       process.exit(1);
@@ -207,7 +210,7 @@ async function main() {
       config.translationModel?.toLowerCase().includes("claude") &&
       !config.apiKeys?.anthropic
     ) {
-      error(
+      logger.error(
         "Anthropic API key is required for configured Claude translation model."
       );
       process.exit(1);
@@ -216,7 +219,7 @@ async function main() {
       !config.translationModel?.toLowerCase().includes("claude") &&
       !config.apiKeys?.gemini
     ) {
-      error(
+      logger.error(
         "Gemini API key is required for configured non-Claude translation model."
       );
       process.exit(1);
@@ -227,15 +230,16 @@ async function main() {
     ensureDir(config.intermediateDir);
 
     // Start the pipeline
-    info("Starting subtitle translation pipeline");
+    const pipelineStartTime = Date.now();
+    logger.info("Starting subtitle translation pipeline");
     if (config.processOnlyPart !== undefined) {
-      info(
+      logger.info(
         chalk.magentaBright(
           `--- Processing ONLY Part ${config.processOnlyPart} ---`
         )
       );
     }
-    debug(
+    logger.debug(
       `Configuration: ${JSON.stringify(
         { ...config, apiKeys: { gemini: "***", anthropic: "***" } },
         null,
@@ -244,9 +248,25 @@ async function main() {
     );
     let currentChunks: ChunkInfo[] = [];
     const allIssues: ProcessingIssue[] = [];
+    let videoDuration: number | null = null; // Store video duration
+
+    // --- Cost Tracking Initialization ---
+    const costBreakdown: CostBreakdown = {
+      totalCost: 0,
+      transcriptionCost: 0,
+      translationCost: 0,
+      costPerModel: {},
+      warnings: [],
+    };
 
     // --- Step 1: Split ---
-    info(chalk.blueBright("--- Step 1: Splitting Inputs ---"));
+    logger.info(chalk.blueBright("--- Step 1: Splitting Inputs ---"));
+    videoDuration = await getVideoDuration(config.videoPath);
+    if (!videoDuration) {
+      logger.warn(
+        "Could not determine video duration. Cost per minute will be unavailable."
+      );
+    }
     const splitResult = await split({
       videoPath: config.videoPath,
       srtPath: config.srtPath,
@@ -261,7 +281,7 @@ async function main() {
     currentChunks = splitResult.chunks;
     allIssues.push(...splitResult.issues);
     if (currentChunks.filter((c) => c.status !== "failed").length === 0) {
-      error("Splitting failed for all chunks. Aborting pipeline.");
+      logger.error("Splitting failed for all chunks. Aborting pipeline.");
       // TODO: Add final report generation here
       process.exit(1);
     }
@@ -273,18 +293,18 @@ async function main() {
         (c) => c.partNumber === config.processOnlyPart
       );
       if (relevantChunks.length === 0) {
-        error(
+        logger.error(
           `Specified part ${config.processOnlyPart} not found after splitting. Aborting.`
         );
         process.exit(1);
       }
-      info(
+      logger.info(
         `Focusing on ${relevantChunks.length} chunk(s) for part ${config.processOnlyPart}.`
       );
     }
 
     // --- Step 2: Transcribe & Adjust ---
-    info(
+    logger.info(
       chalk.blueBright("--- Step 2: Transcription & Timestamp Adjustment ---")
     );
     const transcribeResult = await transcribe(relevantChunks, config);
@@ -303,14 +323,66 @@ async function main() {
         : currentChunks;
     // --- End Merge ---
     if (relevantChunks.filter((c) => c.status === "prompting").length === 0) {
-      error(
+      logger.error(
+        "Transcription/Adjustment failed for all targeted chunks. Aborting pipeline."
+      );
+      process.exit(1);
+    }
+
+    // --- Calculate Transcription Costs ---
+    logger.debug("Calculating transcription costs...");
+    let transcriptionTokensFound = false;
+    currentChunks.forEach((chunk) => {
+      if (
+        chunk.llmTranscriptionInputTokens !== undefined &&
+        chunk.llmTranscriptionOutputTokens !== undefined
+      ) {
+        transcriptionTokensFound = true;
+        const modelName = config.transcriptionModel;
+        const cost = calculateCost(
+          modelName,
+          chunk.llmTranscriptionInputTokens,
+          chunk.llmTranscriptionOutputTokens
+        );
+        costBreakdown.transcriptionCost += cost;
+        costBreakdown.totalCost += cost;
+        costBreakdown.costPerModel[modelName] =
+          (costBreakdown.costPerModel[modelName] || 0) + cost;
+      } else {
+        if (
+          relevantChunks.some(
+            (rc) =>
+              rc.partNumber === chunk.partNumber &&
+              rc.status !== "splitting" &&
+              rc.status !== "pending"
+          )
+        ) {
+          const warnMsg = `Token count unavailable for transcription model: ${config.transcriptionModel}`;
+          if (!costBreakdown.warnings.includes(warnMsg)) {
+            costBreakdown.warnings.push(warnMsg);
+          }
+        }
+      }
+    });
+    if (!transcriptionTokensFound && relevantChunks.length > 0) {
+      logger.warn(
+        "Could not find transcription token counts for any processed chunks."
+      );
+    }
+    // --- End Cost Calculation ---
+    relevantChunks =
+      config.processOnlyPart !== undefined
+        ? currentChunks.filter((c) => c.partNumber === config.processOnlyPart)
+        : currentChunks;
+    if (relevantChunks.filter((c) => c.status === "prompting").length === 0) {
+      logger.error(
         "Transcription/Adjustment failed for all targeted chunks. Aborting pipeline."
       );
       process.exit(1);
     }
 
     // --- Step 3: Translate ---
-    info(chalk.blueBright("--- Step 3: Generating Translations ---"));
+    logger.info(chalk.blueBright("--- Step 3: Generating Translations ---"));
     const translateResult = await translate(relevantChunks, config);
     allIssues.push(...translateResult.issues);
     // --- Merge Step 3 Results ---
@@ -328,34 +400,140 @@ async function main() {
     // --- End Merge ---
     // Check status on the potentially filtered relevantChunks
     if (relevantChunks.filter((c) => c.status === "completed").length === 0) {
-      error(
+      logger.error(
+        "Translation/Validation failed for all targeted chunks. Aborting pipeline."
+      );
+      process.exit(1);
+    }
+
+    // --- Calculate Translation Costs ---
+    logger.debug("Calculating translation costs...");
+    let translationTokensFound = false;
+    currentChunks.forEach((chunk) => {
+      if (
+        chunk.llmTranslationInputTokens !== undefined &&
+        chunk.llmTranslationOutputTokens !== undefined
+      ) {
+        translationTokensFound = true;
+        const modelName = config.translationModel;
+        const cost = calculateCost(
+          modelName,
+          chunk.llmTranslationInputTokens,
+          chunk.llmTranslationOutputTokens
+        );
+        costBreakdown.translationCost += cost;
+        costBreakdown.totalCost += cost;
+        costBreakdown.costPerModel[modelName] =
+          (costBreakdown.costPerModel[modelName] || 0) + cost;
+      } else {
+        if (
+          relevantChunks.some(
+            (rc) =>
+              rc.partNumber === chunk.partNumber &&
+              rc.status !== "prompting" &&
+              rc.status !== "pending"
+          )
+        ) {
+          const warnMsg = `Token count unavailable for translation model: ${config.translationModel}`;
+          if (!costBreakdown.warnings.includes(warnMsg)) {
+            costBreakdown.warnings.push(warnMsg);
+          }
+        }
+      }
+    });
+    if (!translationTokensFound && relevantChunks.length > 0) {
+      logger.warn(
+        "Could not find translation token counts for any processed chunks."
+      );
+    }
+    // --- End Cost Calculation ---
+    relevantChunks =
+      config.processOnlyPart !== undefined
+        ? currentChunks.filter((c) => c.partNumber === config.processOnlyPart)
+        : currentChunks;
+    if (relevantChunks.filter((c) => c.status === "completed").length === 0) {
+      logger.error(
         "Translation/Validation failed for all targeted chunks. Aborting pipeline."
       );
       process.exit(1);
     }
 
     // --- Step 4: Finalize Subtitles ---
-    info(chalk.blueBright("--- Step 4: Finalizing Subtitles ---"));
+    logger.info(chalk.blueBright("--- Step 4: Finalizing Subtitles ---"));
     const finalizeResult = await finalize(currentChunks, config);
     allIssues.push(...finalizeResult.issues);
     const finalSrtPath = finalizeResult.finalSrtPath;
 
     // --- Pipeline Complete ---
+    // Calculate final cost metrics
+    if (videoDuration && videoDuration > 0) {
+      costBreakdown.costPerMinute =
+        (costBreakdown.totalCost / videoDuration) * 60;
+    }
+
+    // --- Final Report Output ---
     if (finalSrtPath) {
-      info("Pipeline completed successfully!");
+      logger.success(chalk.greenBright("Pipeline completed successfully!"));
+      let reportContent = `Pipeline Summary:
+`;
+      reportContent += `- Final SRT: ${finalSrtPath}
+`;
+      reportContent += `- Intermediate Files: ${config.intermediateDir}
+`;
+      reportContent += `- Total Issues Logged: ${allIssues.length}
+`;
+      // Cost Report
+      reportContent += `\n--- Estimated Cost Breakdown ---
+`;
+      reportContent += `- Total: $${costBreakdown.totalCost.toFixed(4)}
+`;
+      reportContent += `- Transcription: $${costBreakdown.transcriptionCost.toFixed(
+        4
+      )} (Model: ${config.transcriptionModel})
+`;
+      reportContent += `- Translation: $${costBreakdown.translationCost.toFixed(
+        4
+      )} (Model: ${config.translationModel})
+`;
+      if (costBreakdown.costPerMinute !== undefined) {
+        reportContent += `- Cost Per Minute of Video: $${costBreakdown.costPerMinute.toFixed(
+          4
+        )}
+`;
+      }
+      // Per-model breakdown if multiple distinct models were used
+      if (Object.keys(costBreakdown.costPerModel).length > 1) {
+        reportContent += `- Cost Per Model Details:
+`;
+        for (const [model, cost] of Object.entries(
+          costBreakdown.costPerModel
+        )) {
+          reportContent += `    - ${model}: $${cost.toFixed(4)}
+`;
+        }
+      }
+      if (costBreakdown.warnings.length > 0) {
+        reportContent += `\n- Cost Warnings:\n`;
+        costBreakdown.warnings.forEach(
+          (w: string) => (reportContent += `    - ${w}\n`)
+        );
+      }
+      reportContent += `(Note: Costs are estimates based on token counts reported by APIs where available.)`;
+
       console.log(
-        boxen(
-          `Final SRT: ${finalSrtPath}\nIntermediate Files: ${config.intermediateDir}\nTotal Issues Logged: ${allIssues.length}`,
-          {
-            padding: 1,
-            margin: 1,
-            borderColor: "green",
-            title: "Pipeline Summary",
-          }
-        )
+        boxen(reportContent, {
+          padding: 1,
+          margin: 1,
+          borderColor: "green",
+          title: "Pipeline Summary",
+        })
       );
     } else {
-      error("Pipeline completed, but failed to generate final SRT file.");
+      logger.error(
+        chalk.redBright(
+          "Pipeline completed, but failed to generate final SRT file."
+        )
+      );
       console.log(
         boxen(
           `Final SRT generation failed.\nCheck logs and intermediate files: ${config.intermediateDir}\nTotal Issues Logged: ${allIssues.length}`,
@@ -370,7 +548,7 @@ async function main() {
       process.exit(1);
     }
   } catch (err: any) {
-    error(`Fatal pipeline error: ${err.message || err}`);
+    logger.error(`Fatal pipeline error: ${err.message || err}`, err.stack);
     console.error(
       boxen(
         chalk.red(

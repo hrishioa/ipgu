@@ -15,7 +15,7 @@ import {
   readFromFile,
 } from "../utils/file_utils.js";
 import { generateTranslationPrompt } from "./prompt_generator.js";
-import { callGemini } from "./gemini_translator.js";
+import { callGemini, type GeminiCallResult } from "./gemini_translator.js";
 import { callClaude, type ClaudeCallResult } from "./claude_translator.js";
 import { parseTranslationResponse } from "../parser/response_parser.js";
 import { validateTranslations } from "../validator/translation_validator.js";
@@ -23,19 +23,30 @@ import { validateTranslations } from "../validator/translation_validator.js";
 // Helper function for exponential backoff
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Structure to hold data across retries
+interface FailedAttemptData {
+  attemptNum: number;
+  responseText: string;
+  validationIssues: ProcessingIssue[];
+  parsingIssues: ProcessingIssue[];
+}
+
 /**
  * Processes a single chunk: generates prompt, calls LLM, handles retries (API & Validation), parses, validates, saves results.
+ * Includes special handling for the last chunk on final validation attempt.
  */
 async function processTranslationChunk(
   chunk: ChunkInfo,
   config: Config,
   issues: ProcessingIssue[],
   isLastChunk: boolean,
+  // Pass accumulated failed data through recursive calls
+  failedAttemptsData: FailedAttemptData[] = [],
   attemptNum: number = 1
 ): Promise<void> {
   const llmLogsDir = join(config.intermediateDir, "llm_logs");
   const responsesDir = join(config.intermediateDir, "llm_responses");
-  const parsedDir = join(config.intermediateDir, "parsed_data"); // Define parsed data dir
+  const parsedDir = join(config.intermediateDir, "parsed_data");
   ensureDir(llmLogsDir);
   ensureDir(responsesDir);
   ensureDir(parsedDir);
@@ -104,8 +115,7 @@ async function processTranslationChunk(
   }
 
   // 2. Call LLM with API Retries (Use general config.retries)
-  let callResult: ClaudeCallResult | { responseText: string | null } | null =
-    null; // Can hold results from either LLM
+  let callResult: ClaudeCallResult | GeminiCallResult | null = null; // Updated type
   const maxApiRetries = config.retries ?? 2;
   for (let apiAttempt = 1; apiAttempt <= maxApiRetries + 1; apiAttempt++) {
     chunk.status = "translating";
@@ -114,25 +124,28 @@ async function processTranslationChunk(
         maxApiRetries + 1
       }`
     );
-    let currentRawResponse: string | null = null; // Store text response separately
+    let currentRawResponse: string | null = null;
+    chunk.llmTranslationInputTokens = undefined; // Reset tokens for this attempt
+    chunk.llmTranslationOutputTokens = undefined;
 
     try {
       if (config.translationModel.toLowerCase().includes("claude")) {
-        const claudeResult = await callClaude(prompt!, config, chunk); // Assert prompt is not null here
-        if (claudeResult) {
-          currentRawResponse = claudeResult.responseText;
-          // Store tokens directly in chunk info
-          chunk.llmTranslationInputTokens = claudeResult.inputTokens;
-          chunk.llmTranslationOutputTokens = claudeResult.outputTokens;
-          callResult = claudeResult; // Store full result
+        callResult = await callClaude(prompt!, config, chunk);
+        if (callResult) {
+          currentRawResponse = callResult.responseText;
+          chunk.llmTranslationInputTokens = callResult.inputTokens;
+          chunk.llmTranslationOutputTokens = callResult.outputTokens;
+        } else {
+          currentRawResponse = null; // Ensure null if callClaude returns null
         }
       } else {
-        currentRawResponse = await callGemini(prompt!, config, chunk); // Assert prompt is not null
-        // For Gemini, we don't have separate token info from this call currently
-        chunk.llmTranslationInputTokens = undefined; // Clear potential old values
-        chunk.llmTranslationOutputTokens = undefined;
-        if (currentRawResponse !== null) {
-          callResult = { responseText: currentRawResponse }; // Store simple result
+        callResult = await callGemini(prompt!, config, chunk);
+        if (callResult) {
+          currentRawResponse = callResult.responseText;
+          chunk.llmTranslationInputTokens = callResult.inputTokens;
+          chunk.llmTranslationOutputTokens = callResult.outputTokens;
+        } else {
+          currentRawResponse = null; // Ensure null if callGemini returns null
         }
       }
 
@@ -207,28 +220,31 @@ async function processTranslationChunk(
       chunk.partNumber,
       config.targetLanguages
     );
-  issues.push(...parsingIssues); // Add parsing issues to the main list
+  // Add parsing issues to the main list AND store them for this attempt
+  issues.push(...parsingIssues);
+  const currentAttemptParsingIssues = parsingIssues;
 
   // 5. Validate Parsed Response
   logger.info(
     `[Chunk ${chunk.partNumber}] Validating parsed response (Attempt ${attemptNum})...`
   );
+  const maxValidationRetries = config.retries ?? 1;
+  const isFinalValidationAttempt = attemptNum >= maxValidationRetries + 1;
   const { isValid: isTranslationValid, validationIssues } =
     await validateTranslations(
       chunk.partNumber,
       parsedEntries,
-      parsingIssues,
+      currentAttemptParsingIssues,
       chunk.srtChunkPath,
       config,
       isLastChunk,
-      attemptNum === (config.retries ?? 1)
+      isFinalValidationAttempt // Pass flag indicating if this is the last chance
     );
-  // Add validation issues regardless of outcome, severity determines action
+  // Add validation issues to the main list AND store them for this attempt
   issues.push(...validationIssues);
+  const currentAttemptValidationIssues = validationIssues;
 
   // 6. Handle Validation Outcome & Validation Retries
-  const maxValidationRetries = config.retries ?? 1;
-
   if (isTranslationValid) {
     // --- Validation Success ---
     logger.info(
@@ -312,6 +328,7 @@ async function processTranslationChunk(
         config,
         issues,
         isLastChunk,
+        failedAttemptsData,
         attemptNum + 1
       );
     }
@@ -594,7 +611,8 @@ async function cliMain() {
   logger.configureLogger({
     logToFile: !!opts.logFile,
     logFilePath: opts.logFile,
-    minLogLevel: opts.logLevel || "info",
+    consoleLogLevel: opts.logLevel || "info",
+    // fileLogLevel defaults to debug if logToFile is true
   });
 
   const cliOptions: TranslatorCliOptions = {
@@ -749,7 +767,7 @@ async function cliMain() {
     const targetedFailed = targetedChunks.some((c) => c.status === "failed");
     process.exit(targetedFailed ? 1 : 0);
   } catch (err: any) {
-    logger.error(`Fatal translator error: ${err.message || err}`);
+    logger.error(`Fatal translator error: ${err.message || err}`, err.stack);
     console.error(
       boxen(chalk.red(`Fatal Error: ${err.message || err}`), {
         padding: 1,

@@ -214,13 +214,15 @@ export async function transcribe(
       }
     })()
       .catch((error: any) => {
-        // ... (Catch unexpected errors, update chunk status/error) ...
         if (chunk) {
           chunk.status = "failed";
           chunk.error = `Unexpected error during chunk ${
             chunk.partNumber
           } transcription/adjustment: ${error.message || error}`;
-          logger.error(`[Chunk ${chunk.partNumber}] ${chunk.error}`);
+          logger.error(
+            `[Chunk ${chunk.partNumber}] ${chunk.error}`,
+            error.stack
+          );
           issues.push({
             type: "TranscriptionError",
             severity: "error",
@@ -232,7 +234,8 @@ export async function transcribe(
           logger.error(
             `Unexpected error during transcription processing (chunk undefined): ${
               error.message || error
-            }`
+            }`,
+            error.stack
           );
           issues.push({
             type: "TranscriptionError",
@@ -344,7 +347,7 @@ async function cliMain() {
   logger.configureLogger({
     logToFile: !!opts.logFile,
     logFilePath: opts.logFile,
-    minLogLevel: opts.logLevel || "info",
+    consoleLogLevel: opts.logLevel || "info", // Use consoleLogLevel
   });
 
   const cliOptions: TranscriberCliOptions = {
@@ -480,7 +483,7 @@ async function cliMain() {
 
     process.exit(issues.some((i) => i.severity === "error") ? 1 : 0);
   } catch (err: any) {
-    logger.error(`Fatal transcriber error: ${err.message || err}`);
+    logger.error(`Fatal transcriber error: ${err.message || err}`, err.stack);
     console.error(
       boxen(chalk.red(`Fatal Error: ${err.message || err}`), {
         padding: 1,
