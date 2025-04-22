@@ -45,10 +45,26 @@ export interface ChunkInfo {
   responsePath?: string; // Path to the RAW LLM text response file
   llmRequestLogPath?: string; // Path to structured JSON log of the request sent to LLM
   llmResponseLogPath?: string; // Path to structured JSON log of the full LLM response object
-  llmTranscriptionInputTokens?: number; // Tokens for transcription step
+  llmTranscriptionInputTokens?: number; // Tokens for transcription step (most recent attempt)
   llmTranscriptionOutputTokens?: number;
-  llmTranslationInputTokens?: number;
+  llmTranslationInputTokens?: number; // Tokens for translation step (most recent attempt)
   llmTranslationOutputTokens?: number;
+  cost?: number; // Cost of API calls for this chunk (most recent attempt)
+
+  // Track all attempts
+  allTranscriptionAttempts?: {
+    inputTokens: number;
+    outputTokens: number;
+    cost: number;
+  }[];
+  allTranslationAttempts?: {
+    inputTokens: number;
+    outputTokens: number;
+    cost: number;
+  }[];
+  totalTranscriptionCost?: number; // Sum of all transcription attempt costs
+  totalTranslationCost?: number; // Sum of all translation attempt costs
+  totalCost?: number; // Sum of all costs for this chunk
   parsedDataPath?: string; // Path to parsed JSON from response
   failedTranscriptPath?: string; // Path to raw transcript if it failed validation
   status:

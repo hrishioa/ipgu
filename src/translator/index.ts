@@ -286,31 +286,104 @@ async function processTranslationChunk(
       }`
     );
 
+    // Store the current attempt's data for potential fallback
+    failedAttemptsData.push({
+      attemptNum,
+      responseText: rawResponse,
+      validationIssues: currentAttemptValidationIssues,
+      parsingIssues: currentAttemptParsingIssues,
+    });
+
     if (attemptNum > maxValidationRetries) {
+      // All validation retries exhausted
       logger.error(
         `[Chunk ${chunk.partNumber}] Translation failed validation after ${attemptNum} attempts.`
       );
-      chunk.status = "failed";
-      chunk.error =
-        chunk.error ||
-        `Validation failed after ${attemptNum} attempts: ${
-          errorMessages || "Unknown"
-        }`;
-      // Ensure a final error issue is present if somehow missed
-      if (
-        !issues.some(
-          (i) =>
-            i.chunkPart === chunk.partNumber &&
-            i.severity === "error" &&
-            i.type === "ValidationError"
-        )
-      ) {
-        issues.push({
-          type: "ValidationError",
-          severity: "error",
-          message: chunk.error,
-          chunkPart: chunk.partNumber,
-        });
+
+      // Special handling for last chunk - use the longest response if this is the last chunk
+      if (isLastChunk && failedAttemptsData.length > 0) {
+        logger.warn(
+          `[Chunk ${chunk.partNumber}] This is the last chunk and all validation attempts failed. Finding longest usable response...`
+        );
+
+        // Find the response with the most successfully parsed entries
+        let bestAttempt = failedAttemptsData[0];
+        let maxEntryCount = parsedEntries.length;
+
+        for (const attempt of failedAttemptsData) {
+          const attemptEntries = parseTranslationResponse(
+            attempt.responseText,
+            chunk.partNumber,
+            config.targetLanguages
+          ).entries;
+
+          if (attemptEntries.length > maxEntryCount) {
+            maxEntryCount = attemptEntries.length;
+            bestAttempt = attempt;
+          }
+        }
+
+        logger.info(
+          `[Chunk ${chunk.partNumber}] Using best failed attempt (attempt ${bestAttempt.attemptNum}) with ${maxEntryCount} entries as fallback.`
+        );
+
+        // Re-parse the best attempt
+        const bestParsedResponse = parseTranslationResponse(
+          bestAttempt.responseText,
+          chunk.partNumber,
+          config.targetLanguages
+        );
+
+        // Save the best attempt's parsed data
+        const parsedFileName = `part${chunk.partNumber
+          .toString()
+          .padStart(2, "0")}_parsed.json`;
+        chunk.parsedDataPath = join(parsedDir, parsedFileName);
+        const saveSuccess = await writeToFile(
+          chunk.parsedDataPath,
+          bestParsedResponse.entries
+        );
+
+        if (saveSuccess) {
+          chunk.status = "completed";
+          logger.info(
+            `[Chunk ${chunk.partNumber}] Saved fallback response for the last chunk.`
+          );
+        } else {
+          chunk.status = "failed";
+          chunk.error = `Failed to save parsed data to ${chunk.parsedDataPath}`;
+          issues.push({
+            type: "FormatError",
+            severity: "error",
+            message: chunk.error,
+            chunkPart: chunk.partNumber,
+          });
+          logger.error(`[Chunk ${chunk.partNumber}] ${chunk.error}`);
+        }
+      } else {
+        // Not the last chunk or no failed attempts data available
+        chunk.status = "failed";
+        chunk.error =
+          chunk.error ||
+          `Validation failed after ${attemptNum} attempts: ${
+            errorMessages || "Unknown"
+          }`;
+        // Ensure a final error issue is present if somehow missed
+        if (
+          !issues.some(
+            (i) =>
+              i.chunkPart === chunk.partNumber &&
+              i.severity === "error" &&
+              i.type === "ValidationError"
+          )
+        ) {
+          issues.push({
+            type: "ValidationError",
+            severity: "error",
+            message: chunk.error,
+            chunkPart: chunk.partNumber,
+          });
+        }
       }
     } else {
       logger.info(
@@ -492,6 +565,7 @@ export async function translate(
       config,
       issues,
       isLast,
+      [],
       1
     ).finally(() => {
       processedCount++;

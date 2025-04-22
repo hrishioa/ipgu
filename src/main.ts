@@ -181,7 +181,8 @@ async function main() {
       outputOffsetSeconds: opts.outputOffset
         ? parseFloat(opts.outputOffset)
         : 0,
-      inputOffsetSeconds: opts.inputOffset ? parseFloat(opts.inputOffset) : 0,
+      inputOffsetSeconds:
+        opts.inputOffset !== undefined ? parseFloat(opts.inputOffset) : 0,
       processOnlyPart: opts.part ? parseInt(opts.part) : undefined,
       disableTimingValidation: opts.noTimingCheck || false,
       useResponseTimings: opts.useResponseTimings || false,
@@ -277,6 +278,7 @@ async function main() {
       maxConcurrent: config.maxConcurrent,
       force: config.force,
       processOnlyPart: config.processOnlyPart,
+      inputOffsetSeconds: config.inputOffsetSeconds,
     });
     currentChunks = splitResult.chunks;
     allIssues.push(...splitResult.issues);
@@ -333,7 +335,18 @@ async function main() {
     logger.debug("Calculating transcription costs...");
     let transcriptionTokensFound = false;
     currentChunks.forEach((chunk) => {
-      if (
+      // Check for comprehensive cost tracking first
+      if (chunk.totalTranscriptionCost !== undefined) {
+        transcriptionTokensFound = true;
+        const modelName = config.transcriptionModel;
+        costBreakdown.transcriptionCost += chunk.totalTranscriptionCost;
+        costBreakdown.totalCost += chunk.totalTranscriptionCost;
+        costBreakdown.costPerModel[modelName] =
+          (costBreakdown.costPerModel[modelName] || 0) +
+          chunk.totalTranscriptionCost;
+      }
+      // Fall back to single attempt cost if comprehensive tracking isn't available
+      else if (
         chunk.llmTranscriptionInputTokens !== undefined &&
         chunk.llmTranscriptionOutputTokens !== undefined
       ) {
@@ -410,7 +423,18 @@ async function main() {
     logger.debug("Calculating translation costs...");
     let translationTokensFound = false;
     currentChunks.forEach((chunk) => {
-      if (
+      // Check for comprehensive cost tracking first
+      if (chunk.totalTranslationCost !== undefined) {
+        translationTokensFound = true;
+        const modelName = config.translationModel;
+        costBreakdown.translationCost += chunk.totalTranslationCost;
+        costBreakdown.totalCost += chunk.totalTranslationCost;
+        costBreakdown.costPerModel[modelName] =
+          (costBreakdown.costPerModel[modelName] || 0) +
+          chunk.totalTranslationCost;
+      }
+      // Fall back to single attempt cost if comprehensive tracking isn't available
+      else if (
         chunk.llmTranslationInputTokens !== undefined &&
         chunk.llmTranslationOutputTokens !== undefined
       ) {

@@ -140,6 +140,12 @@ export async function split(
   // If we have an SRT file, split it too
   if (srtPath && existsSync(srtPath)) {
     info(`Splitting SRT: ${srtPath}`);
+    // Log the actual value to help debug
+    info(
+      `Using input offset: ${
+        inputOffsetSeconds !== undefined ? inputOffsetSeconds : 0
+      }s`
+    );
     const srtResult = await splitSrt(
       srtPath,
       chunks,
