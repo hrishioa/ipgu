@@ -6,8 +6,6 @@
   <br>
 </h1>
 
-# `ipgu` (입구) - AI Subtitle Translation Pipeline
-
 We connect through stories, films, and videos. Media transcends borders, but language often creates barriers. Manually creating high-quality subtitles is a significant hurdle, especially for long videos or when translating between languages with vastly different structures and cultural nuances – capturing humor across honorific systems, for example, is incredibly tough.
 
 LLMs are way to solve this, but there are a lot of problems:
@@ -35,31 +33,29 @@ This project, **`ipgu`** (named after the Korean word for "Entrance" - **입구*
 
 ## Table of Contents
 
-- [`ipgu` (입구) - AI Subtitle Translation Pipeline](#ipgu-입구---ai-subtitle-translation-pipeline)
-  - [The Entrance: Introducing `ipgu` (입구)](#the-entrance-introducing-ipgu-입구)
-  - [Demo](#demo)
-  - [Why `ipgu`? (Features)](#why-ipgu-features)
-  - [Table of Contents](#table-of-contents)
-  - [Requirements / Prerequisites](#requirements--prerequisites)
-  - [Installation](#installation)
-  - [Presets](#presets)
-    - [Available Presets](#available-presets)
-    - [Preset Usage](#preset-usage)
-  - [Quick Start](#quick-start)
-  - [Usage (Detailed Reference)](#usage-detailed-reference)
-    - [Examples](#examples)
-  - [Configuration Deep Dive](#configuration-deep-dive)
-    - [API Keys](#api-keys)
-    - [Custom Prompt Template](#custom-prompt-template)
-  - [How It Works (The Pipeline Stages)](#how-it-works-the-pipeline-stages)
-  - [Cost Estimation Explained](#cost-estimation-explained)
-  - [Understanding the Output](#understanding-the-output)
-  - [Troubleshooting](#troubleshooting)
-  - [Project Structure](#project-structure)
-  - [Development](#development)
-  - [Contributing](#contributing)
-  - [License](#license)
-  - [The Vision: An Open Entrance](#the-vision-an-open-entrance)
+- [The Entrance: Introducing `ipgu` (입구)](#the-entrance-introducing-ipgu-입구)
+- [Why `ipgu`? (Features)](#why-ipgu-features)
+- [Table of Contents](#table-of-contents)
+- [Requirements / Prerequisites](#requirements--prerequisites)
+- [Installation](#installation)
+- [Presets](#presets)
+  - [Available Presets](#available-presets)
+  - [Preset Usage](#preset-usage)
+- [Quick Start](#quick-start)
+- [Usage (Detailed Reference)](#usage-detailed-reference)
+  - [Examples](#examples)
+- [Configuration Deep Dive](#configuration-deep-dive)
+  - [API Keys](#api-keys)
+  - [Custom Prompt Template](#custom-prompt-template)
+- [How It Works (The Pipeline Stages)](#how-it-works-the-pipeline-stages)
+- [Cost Estimation Explained](#cost-estimation-explained)
+- [Understanding the Output](#understanding-the-output)
+- [Troubleshooting](#troubleshooting)
+- [Project Structure](#project-structure)
+- [Development](#development)
+- [Contributing](#contributing)
+- [License](#license)
+- [The Vision: An Open Entrance](#the-vision-an-open-entrance)
 
 ## Requirements / Prerequisites
 
