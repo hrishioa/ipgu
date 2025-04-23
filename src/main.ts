@@ -130,7 +130,10 @@ async function main() {
       "--anthropic-api-key <key>",
       "Anthropic API key (or use ANTHROPIC_API_KEY env var)"
     )
-    .option("--log-file <path>", "Path to log file")
+    .option(
+      "--log-file <path>",
+      "Path to log file (defaults to {intermediateDir}/pipeline.log if not specified)"
+    )
     .option(
       "--log-level <level>",
       "Log level (debug, info, warn, error)",
@@ -171,12 +174,16 @@ Examples:
   # Use the Gemini 2.5 preset (fast, high-concurrency)
   bun start --preset 2.5 --video movie.mp4 --srt subtitles.srt --output ./output
   # Intermediate files will be stored in ./output/intermediates
+  # Debug logs will be saved to ./output/intermediates/pipeline.log
 
   # Use the Gemini+Claude preset (higher quality translation, slower)
   bun start --preset 2.5-claude --video movie.mp4 --srt subtitles.srt --output ./output
 
   # Specify a custom intermediate directory
   bun start --preset 2.5 --video movie.mp4 --output ./output --intermediate ./custom_intermediates
+
+  # Specify a custom log file location
+  bun start --preset 2.5 --video movie.mp4 --log-file ./custom_logs/pipeline.log
 
   # Use a preset but override specific parameters
   bun start --preset 2.5 --video movie.mp4 --max-concurrent 6 --chunk-duration 900
@@ -185,15 +192,6 @@ Examples:
     .parse();
 
   const opts = program.opts();
-
-  // Configure logger
-  logger.configureLogger({
-    logToFile: !!opts.logFile,
-    logFilePath: opts.logFile,
-    // Pass console level from CLI, default file level remains debug
-    consoleLogLevel: opts.logLevel || "info",
-    // fileLogLevel will default to 'debug' inside configureLogger if logToFile is true
-  });
 
   try {
     // Parse colors
@@ -235,6 +233,21 @@ Examples:
         }`);
       }
     }
+
+    // Configure logger
+    const intermediatesDir =
+      opts.intermediate || join(opts.output || "./output", "intermediates");
+    // Default log file path if not specified
+    const defaultLogPath = join(intermediatesDir, "pipeline.log");
+
+    logger.configureLogger({
+      logToFile: true, // Always log to file
+      logFilePath: opts.logFile || defaultLogPath,
+      // Pass console level from CLI or preset, default file level to debug
+      consoleLogLevel:
+        opts.logLevel || (presetOptions.logLevel as any) || "info",
+      fileLogLevel: "debug", // Always use debug level for file logging
+    });
 
     // Build configuration, allowing CLI options to override preset values
     const config: Config = {
