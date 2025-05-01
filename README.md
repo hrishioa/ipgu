@@ -71,7 +71,7 @@ This project, **`ipgu`** (named after the Korean word for "Entrance" - **입구*
 1. Clone the repository:
 
    ```bash
-   git clone [https://github.com/your-username/ipgu.git](https://github.com/your-username/ipgu.git) # Replace with your repo URL
+   git clone [https://github.com/hrishioa/ipgu.git](https://github.com/hrishioa/ipgu.git) # Replace with your repo URL
    cd ipgu
    ```
 
