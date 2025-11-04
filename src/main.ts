@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 
 import { Command } from "commander";
 import { join } from "path";
@@ -263,17 +263,17 @@ Examples:
       transcriptionModel:
         opts.transcriptionModel ||
         presetOptions.transcriptionModel ||
-        "gemini-1.5-flash-latest",
+        "gemini-2.5-pro",
       translationModel:
         opts.translationModel ||
         presetOptions.translationModel ||
-        "claude-3-5-sonnet-20240620",
+        "claude-sonnet-4-5",
       chunkDuration: opts.chunkDuration
         ? parseInt(opts.chunkDuration)
-        : presetOptions.chunkDuration || 1200,
+        : presetOptions.chunkDuration || 600,
       chunkOverlap: opts.chunkOverlap
         ? parseInt(opts.chunkOverlap)
-        : presetOptions.chunkOverlap || 300,
+        : presetOptions.chunkOverlap || 120,
       chunkFormat: opts.chunkFormat
         ? opts.chunkFormat === "mp4"
           ? "mp4"
@@ -713,9 +713,7 @@ Examples:
   }
 }
 
-// Run if this is the main module
-if (import.meta.url.replace("file://", "") === Bun.main) {
-  main();
-}
+// Always run main when this file is executed
+main();
 
 export { main };

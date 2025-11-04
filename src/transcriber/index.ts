@@ -496,6 +496,7 @@ async function cliMain() {
 }
 
 // Run main if called directly
-if (import.meta.url.replace("file://", "") === Bun.main) {
+// Run main if called directly (only when running this file standalone with Bun)
+if (typeof Bun !== 'undefined' && import.meta.url.replace("file://", "") === Bun.main) {
   cliMain();
 }

@@ -102,6 +102,15 @@ export async function generateTranslationPrompt(
 
   // --- Populate Template ---
   let populatedPrompt = template;
+
+  // Get source language (if provided)
+  const sourceLanguage = config.sourceLanguages?.[0] || "the source language";
+  if (config.sourceLanguages && config.sourceLanguages.length > 1) {
+    logger.warn(
+      `[Chunk ${chunk.partNumber}] Multiple source languages provided: ${config.sourceLanguages.join(", ")}. Using first one: ${config.sourceLanguages[0]}`
+    );
+  }
+
   populatedPrompt = populatedPrompt.replace(
     "{ADJUSTED_TRANSCRIPT}",
     adjustedTranscriptContent
@@ -110,21 +119,35 @@ export async function generateTranslationPrompt(
     "{REFERENCE_SRT}",
     referenceSrtContent || "[Reference SRT not available]"
   );
+
+  // Replace source language placeholders
+  populatedPrompt = populatedPrompt.replace(
+    /{SOURCE_LANGUAGE_NAME}/g,
+    sourceLanguage
+  );
+
+  // Replace target language placeholders
   populatedPrompt = populatedPrompt.replace(
     /{TARGET_LANGUAGE_NAME}/g,
     targetLanguage
-  ); // Replace all instances
+  );
 
-  // Create and replace the XML example placeholder
-  const safeLangTag = targetLanguage.toLowerCase().replace(/\s+/g, "_");
-  const xmlExample = `<${safeLangTag}_translation>[Your translation for ${targetLanguage}]</${safeLangTag}_translation>`;
+  // Create and replace the target language tag placeholder
+  const targetLangTag = targetLanguage.toLowerCase().replace(/\s+/g, "_");
+  populatedPrompt = populatedPrompt.replace(
+    /{TARGET_LANGUAGE_TAG}/g,
+    targetLangTag
+  );
+
+  // Legacy support: Replace old XML example placeholder if it exists
+  const xmlExample = `<${targetLangTag}_translation>[Your translation for ${targetLanguage}]</${targetLangTag}_translation>`;
   populatedPrompt = populatedPrompt.replace(
     "{TARGET_LANGUAGE_XML_EXAMPLE}",
     xmlExample
   );
 
   logger.debug(
-    `[Chunk ${chunk.partNumber}] Generated translation prompt for English + ${targetLanguage}.`
+    `[Chunk ${chunk.partNumber}] Generated translation prompt for English + ${targetLanguage} (source: ${sourceLanguage}).`
   );
   return populatedPrompt;
 }

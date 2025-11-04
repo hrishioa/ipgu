@@ -3,6 +3,8 @@
 movies
 node_modules
 
+bun.lockb
+
 # Logs
 
 logs

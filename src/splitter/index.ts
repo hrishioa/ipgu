@@ -260,9 +260,7 @@ async function main() {
   }
 }
 
-// Run main if called directly
-const isMain = import.meta.url.replace("file://", "") === Bun.main;
-
-if (isMain) {
+// Run main if called directly (only when running this file standalone with Bun)
+if (typeof Bun !== 'undefined' && import.meta.url.replace("file://", "") === Bun.main) {
   main();
 }

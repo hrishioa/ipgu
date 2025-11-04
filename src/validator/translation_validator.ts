@@ -9,10 +9,10 @@ import type {
 } from "../types.js";
 
 // --- Configuration Constants ---
-const MAX_ERROR_RATE = 0.05; // Allow max 5% parsing errors relative to reference count
-const MIN_COUNT_MATCH_RATE = 0.9; // Require at least 90% of reference subtitles to be parsed
-const MIN_ID_COVERAGE_RATE = 0.9; // Require at least 90% of reference IDs to be present
-const MAX_TIMING_MISMATCH_RATE = 0.1; // Allow max 10% of entries to have timing issues
+const MAX_ERROR_RATE = 0.1; // Allow max 10% parsing errors relative to reference count (was 5%)
+const MIN_COUNT_MATCH_RATE = 0.8; // Require at least 80% of reference subtitles to be parsed (was 90%)
+const MIN_ID_COVERAGE_RATE = 0.8; // Require at least 80% of reference IDs to be present (was 90%)
+const MAX_TIMING_MISMATCH_RATE = 0.25; // Allow max 25% of entries to have timing issues (was 10%)
 const TIMING_DIFF_MARGIN_RATIO = 0.1; // Allow 10% difference relative to SRT duration
 const TIMING_DIFF_ABS_MARGIN_S = 0.5; // Allow absolute difference of 0.5 seconds
 

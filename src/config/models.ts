@@ -14,6 +14,11 @@ export interface ModelCost {
  */
 export const MODEL_COSTS: Record<string, ModelCost> = {
   // Claude Models (Add variations as needed)
+  "claude-sonnet-4-5": {
+    // Claude Sonnet 4.5 (latest)
+    inputCostPerMillionTokens: 3,
+    outputCostPerMillionTokens: 15,
+  },
   "claude-3-5-sonnet-20240620": {
     // Matches Anthropic identifier
     inputCostPerMillionTokens: 3,
@@ -35,6 +40,11 @@ export const MODEL_COSTS: Record<string, ModelCost> = {
 
   // Gemini Models (Use API identifiers)
   // Note: Gemini 1.5 pricing might vary based on context size/modality later
+  "gemini-2.5-pro": {
+    // Gemini 2.5 Pro (latest stable)
+    inputCostPerMillionTokens: 1.25,
+    outputCostPerMillionTokens: 10.0,
+  },
   "gemini-1.5-pro-latest": {
     // Standard context pricing, adjust if using 1M context
     inputCostPerMillionTokens: 3.5,

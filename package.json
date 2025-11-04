@@ -1,8 +1,35 @@
 {
-  "name": "subtitle-translation-pipeline",
-  "version": "1.0.0",
-  "description": "End-to-end pipeline for generating bilingual subtitles from videos",
+  "name": "ipgu",
+  "version": "1.0.1",
+  "description": "AI-powered subtitle translation pipeline (입구 - Entrance). Automatically transcribe and translate videos into bilingual subtitles using Gemini and Claude.",
   "type": "module",
+  "main": "./dist/main.js",
+  "bin": {
+    "ipgu": "./dist/main.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "subtitle",
+    "translation",
+    "srt",
+    "video",
+    "transcription",
+    "gemini",
+    "claude",
+    "ai",
+    "llm",
+    "bilingual"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hrishioa/ipgu.git"
+  },
   "scripts": {
     "dev": "bun --watch src/main.ts",
     "start": "bun src/main.ts",
@@ -13,7 +40,8 @@
     "validator": "bun src/validator/index.ts",
     "merge": "bun src/merger/index.ts",
     "formatter": "bun src/formatter/index.ts",
-    "build": "bun build src/main.ts --target node --outdir dist",
+    "build": "tsup",
+    "prepublishOnly": "npm run build",
     "test": "bun test"
   },
   "dependencies": {
@@ -27,6 +55,8 @@
   },
   "devDependencies": {
     "@types/node": "^20.10.5",
-    "bun-types": "latest"
+    "bun-types": "latest",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.3"
   }
 }

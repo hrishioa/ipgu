@@ -44,7 +44,7 @@ export async function callClaude(
 
     const stream = client.messages.stream({
       model: modelName,
-      max_tokens: 64000, // Still good practice to set a max
+      max_tokens: 64000, // Increased from typical 4096 to allow longer outputs
       messages: [
         {
           role: "user",
@@ -53,7 +53,7 @@ export async function callClaude(
       ],
       thinking: {
         type: "enabled",
-        budget_tokens: 9000, // As per example
+        budget_tokens: 10000, // Increased thinking budget
       },
       // Beta features like 'thinking' might not be available/needed for the standard stream,
       // omit them unless specifically required and tested with the stream endpoint.
